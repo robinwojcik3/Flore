@@ -1,117 +1,176 @@
-# app.py (extraits modifiés)
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Streamlit app : récupération automatisée d’informations botaniques
 
-import streamlit as st
+Auteur : Robin Wojcik (Améten)
+Date   : 2025‑05‑27
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import webbrowser
-import requests # Pour les appels API (Tela Botanica)
-# ... autres imports ...
+import requests
+import streamlit as st
+from bs4 import BeautifulSoup
+from urllib.parse import quote_plus
 
-# --- Fonctions Utilitaires (Mises à jour) ---
+# -----------------------------------------------------------------------------
+# Configuration globale
+# -----------------------------------------------------------------------------
 
-def get_tela_botanica_nn(species_name):
-    """
-    Interroge l'API de Tela Botanica pour obtenir le numéro national (NN) d'une espèce.
-    Retourne le NN ou None si non trouvé ou en cas d'erreur.
-    """
+st.set_page_config(page_title="Auto‑scraper espèces", layout="wide", page_icon="🌿")
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; AutoScraper/0.1; +https://github.com/ameten)"
+}
+
+# -----------------------------------------------------------------------------
+# Fonctions utilitaires
+# -----------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False, ttl=86_400)
+def fetch_html(url: str) -> BeautifulSoup | None:
+    """Télécharge une page et renvoie son contenu analysé par BeautifulSoup."""
     try:
-        api_url = "https://api.tela-botanica.org/service:eflore:0.1/noms/completion"
-        params = {
-            'q': species_name,
-            'limite': 1, # On prend le premier résultat pertinent
-            'type_liste': 'liste_initiale'
-        }
-        response = requests.get(api_url, params=params, timeout=10)
-        response.raise_for_status() # Lève une exception pour les codes d'erreur HTTP
-        data = response.json()
-        
-        # La structure exacte de la réponse doit être vérifiée
-        # Supposons que les résultats sont dans une liste et que le premier a 'num_nom'
-        if data and isinstance(data, list) and len(data) > 0:
-            # Tenter de trouver une correspondance exacte (ou la plus probable)
-            # La logique de sélection peut nécessiter d'être affinée.
-            # Par exemple, vérifier si 'nom_sci_complet' correspond exactement
-            # Ici, on prend le premier pour simplifier
-            first_result = data[0]
-            if 'num_nom' in first_result:
-                return first_result['num_nom']
-        st.warning(f"[Tela Botanica] Impossible de trouver le NN pour '{species_name}' via API. Réponse: {data}")
-        return None
-    except requests.exceptions.RequestException as e:
-        st.error(f"[Tela Botanica] Erreur API pour '{species_name}': {e}")
-        return None
-    except ValueError as e: # Erreur de parsing JSON
-        st.error(f"[Tela Botanica] Erreur de parsing JSON pour '{species_name}': {e}")
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        return BeautifulSoup(r.text, "lxml")
+    except requests.RequestException:
         return None
 
 
-def build_tela_botanica_url(species_name):
-    """
-    Construit l'URL de la fiche espèce sur Tela Botanica en utilisant l'ID (NN).
-    """
-    nn_id = get_tela_botanica_nn(species_name)
-    if nn_id:
-        return f"https://www.tela-botanica.org/bdtfx-nn-{nn_id}-synthese"
-    else:
-        st.warning(f"[Tela Botanica] URL non construite pour '{species_name}' car NN non trouvé.")
+def florealpes_search(species: str) -> str | None:
+    """Renvoie la première URL de fiche FloreAlpes trouvée."""
+    search_url = f"https://www.florealpes.com/recherche.php?rech={quote_plus(species)}&L=0"
+    soup = fetch_html(search_url)
+    if soup is None:
+        return None
+    link = soup.select_one("a[href^='fiche_']")
+    return f"https://www.florealpes.com/{link['href']}" if link else None
+
+
+def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
+    """Extrait l’image principale et le tableau des caractéristiques."""
+    soup = fetch_html(url)
+    if soup is None:
+        return None, None
+
+    # Image
+    img_tag = soup.select_one("a[href$='.jpg'] img") or soup.select_one("img[src$='.jpg']")
+    img_url = (
+        f"https://www.florealpes.com/{img_tag['src'].lstrip('/')}" if img_tag else None
+    )
+
+    # Tableau de caractéristiques
+    data_tbl = None
+    tbl = soup.find("table", class_="fiche")
+    if tbl:
+        rows = [
+            [td.get_text(strip=True) for td in tr.select("td")]
+            for tr in tbl.select("tr")
+            if len(tr.select("td")) == 2
+        ]
+        if rows:
+            data_tbl = pd.DataFrame(rows, columns=["Attribut", "Valeur"])
+
+    return img_url, data_tbl
+
+
+def infoflora_url(species: str) -> str:
+    slug = species.lower().replace(" ", "-")
+    return f"https://www.infoflora.ch/fr/flore/{slug}.html"
+
+
+def tela_botanica_url(species: str) -> str | None:
+    """Interroge l’API eFlore pour récupérer l’identifiant num_nomen."""
+    api = (
+        "https://api.tela-botanica.org/service:eflore:0.1/" "names:search?mode=exact&taxon="
+        f"{quote_plus(species)}"
+    )
+    try:
+        data = requests.get(api, headers=HEADERS, timeout=10).json()
+        if not data:
+            return None
+        nn = data[0].get("num_nomen")
+        return f"https://www.tela-botanica.org/bdtfx-nn-{nn}-synthese" if nn else None
+    except requests.RequestException:
         return None
 
-def build_infoflora_url(species_name):
-    """
-    Construit l'URL de la fiche espèce sur InfoFlora.
-    Exemple pour Lamium purpureum : https://www.infoflora.ch/fr/flore/lamium-purpureum.html
-    """
-    if not species_name:
-        return None
-    formatted_name = species_name.lower().replace(" ", "-")
-    # Gérer les cas de sous-espèces ou variétés si nécessaire (ex: "subsp.", "var.")
-    # Cela pourrait nécessiter un nettoyage plus avancé du nom
-    return f"https://www.infoflora.ch/fr/flore/{formatted_name}.html"
 
-# Pour Floralp, la stratégie principale reste la recherche automatisée.
-# L'URL https://www.florealpes.com/fiche_lamierpourpre.php est la CIBLE de cette recherche.
-def search_and_scrape_floralp(species_name):
-    """
-    Automatise la recherche sur Floralp et scrape les images.
-    La cible pour 'Lamium purpureum' est 'https://www.florealpes.com/fiche_lamierpourpre.php'.
-    Cette fonction utilisera Selenium pour naviguer et atteindre cette page, puis scraper.
-    """
-    st.subheader(f"Floralp : {species_name}")
-    # ... (Début du Code Selenium comme précédemment)
-    # L'objectif de la navigation automatisée sera d'arriver sur une URL
-    # du type https://www.florealpes.com/fiche_NOMFORMATTEPOURFLORALPES.php
-    # puis de scraper les images.
-    # ... (Fin du Code Selenium)
-    st.warning(f"[Floralp] Logique de recherche et de scrapping pour '{species_name}' à implémenter avec Selenium. Cible type : ...fiche_nomvernaculaire.php")
-    return []
+def openobs_embed(species: str) -> str:
+    """HTML pour afficher la carte OpenObs dans un iframe."""
+    return (
+        "<iframe src='https://openobs.mnhn.fr/map.html?sp="
+        f"{quote_plus(species)}' width='100%' height='500' frameborder='0'></iframe>"
+    )
 
-def display_openobs_distribution(species_name): # Ou Atlas Biodiv AURA
-    """
-    Affiche la répartition de l'espèce depuis l'Atlas Biodiversité Auvergne-Rhône-Alpes.
-    Exemple pour Lamium purpureum (ID 10): https://atlas.biodiversite-auvergne-rhone-alpes.fr/espece/10
-    """
-    st.subheader(f"Atlas Biodiversité AURA - Répartition : {species_name}")
-    # --- Début du Code pour Atlas Biodiv AURA ---
-    # ÉTAPE 1: Obtenir l'ID de l'espèce pour l'Atlas.
-    # Ceci est la partie la plus complexe et non triviale.
-    # species_id_on_atlas = find_species_id_on_atlas(species_name) # Fonction à créer
 
-    # Placeholder pour l'ID - à remplacer par une logique dynamique
-    species_id_map = {
-        "Lamium purpureum": "10"
-        # Ajouter d'autres espèces connues ici ou implémenter une recherche dynamique
-    }
-    species_id_on_atlas = species_id_map.get(species_name)
+def biodivra_url(species: str) -> str:
+    return f"https://atlas.biodiversite-auvergne-rhone-alpes.fr/recherche?keyword={quote_plus(species)}"
 
-    if species_id_on_atlas:
-        atlas_url = f"https://atlas.biodiversite-auvergne-rhone-alpes.fr/espece/{species_id_on_atlas}"
-        st.markdown(f"Lien direct vers l'Atlas AURA : [{atlas_url}]({atlas_url})")
-        try:
-            # Tenter d'afficher dans un iframe. Vérifier les en-têtes X-Frame-Options du site.
-            st.components.v1.iframe(atlas_url, height=500, scrolling=True)
-        except Exception as e:
-            st.warning(f"Impossible d'afficher l'iframe pour l'Atlas AURA (peut-être bloqué par le site) : {e}")
-    else:
-        st.warning(f"[Atlas AURA] ID non trouvé pour '{species_name}'. Logique d'obtention d'ID à implémenter.")
-    # --- Fin du Code pour Atlas Biodiv AURA ---
+# -----------------------------------------------------------------------------
+# Interface utilisateur
+# -----------------------------------------------------------------------------
 
-# ... (Reste du script app.py) ...
+st.title("Recherche automatisée d’informations sur les espèces")
+st.markdown("Saisissez les noms scientifiques (un par ligne) puis lancez la recherche.")
+
+input_txt = st.text_area(
+    "Liste d’espèces", placeholder="Lamium purpureum\nTrifolium alpinum", height=180
+)
+
+if st.button("Lancer la recherche", type="primary") and input_txt.strip():
+    species_list = [s.strip() for s in input_txt.splitlines() if s.strip()]
+
+    for sp in species_list:
+        st.subheader(sp)
+        tab_fa, tab_if, tab_tb, tab_obs, tab_bio = st.tabs(
+            [
+                "FloreAlpes",
+                "InfoFlora",
+                "Tela Botanica",
+                "OpenObs (carte)",
+                "Biodiv'RA",
+            ]
+        )
+
+        # ---- FloreAlpes ------------------------------------------------------
+        with tab_fa:
+            url_fa = florealpes_search(sp)
+            if url_fa:
+                st.markdown(f"[Fiche complète]({url_fa})")
+                img, tbl = scrape_florealpes(url_fa)
+                if img:
+                    st.image(img, caption=sp, use_column_width=True)
+                if tbl is not None:
+                    st.dataframe(tbl, hide_index=True)
+            else:
+                st.warning("Fiche introuvable sur FloreAlpes.")
+
+        # ---- InfoFlora -------------------------------------------------------
+        with tab_if:
+            url_if = infoflora_url(sp)
+            st.markdown(f"[Fiche InfoFlora]({url_if})")
+            st.components.v1.iframe(src=url_if, height=600)
+
+        # ---- Tela Botanica ---------------------------------------------------
+        with tab_tb:
+            url_tb = tela_botanica_url(sp)
+            if url_tb:
+                st.markdown(f"[Synthèse]({url_tb})")
+                st.components.v1.iframe(src=url_tb, height=600)
+            else:
+                st.warning("Aucune correspondance via l’API eFlore.")
+
+        # ---- OpenObs ---------------------------------------------------------
+        with tab_obs:
+            st.write("Répartition nationale (OpenObs)")
+            st.components.v1.html(openobs_embed(sp), height=600, scrolling=True)
+
+        # ---- Biodiv'RA -------------------------------------------------------
+        with tab_bio:
+            url_bio = biodivra_url(sp)
+            st.markdown(f"[Accéder à l’atlas]({url_bio})")
+            st.components.v1.iframe(src=url_bio, height=600)
+else:
+    st.info("Saisissez au moins une espèce pour démarrer la recherche.")
