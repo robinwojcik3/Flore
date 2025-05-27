@@ -58,20 +58,24 @@ def florealpes_search(species: str) -> str | None:
     try:
         sess.get("https://www.florealpes.com/index.php", timeout=10)
     except requests.RequestException:
+        st.warning("Impossible de charger la page d'accueil de FloreAlpes.")
         return None
 
     # 2) Soumission du champ «chaine» — page résultat : recherche.php
     try:
+        # Paramètres corrigés pour correspondre au formulaire du site
+        params_florealpes = {"chaine": species, "OK": "OK"}
         resp = sess.get(
             "https://www.florealpes.com/recherche.php",
-            params={"rech": species, "L": "0"},
+            params=params_florealpes,
             timeout=10,
         )
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
         link = soup.select_one("a[href^='fiche_']")
-        return f"https://www.florealpes.com/{link['href']}" if link else None
+        return f"https://www.florealpes.com/{link['href'].lstrip('/')}" if link and link.has_attr('href') else None
     except requests.RequestException:
+        st.warning(f"Erreur lors de la recherche de '{species}' sur FloreAlpes.")
         return None
 
 
@@ -84,7 +88,7 @@ def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
     # Image
     img_tag = soup.select_one("a[href$='.jpg'] img") or soup.select_one("img[src$='.jpg']")
     img_url = (
-        f"https://www.florealpes.com/{img_tag['src'].lstrip('/')}" if img_tag else None
+        f"https://www.florealpes.com/{img_tag['src'].lstrip('/')}" if img_tag and img_tag.has_attr('src') else None
     )
 
     # Tableau de caractéristiques
@@ -170,8 +174,10 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
                     st.image(img, caption=sp, use_column_width=True)
                 if tbl is not None:
                     st.dataframe(tbl, hide_index=True)
+                else:
+                    st.info("Tableau des caractéristiques non trouvé sur la fiche FloreAlpes.")
             else:
-                st.warning("Fiche introuvable sur FloreAlpes.")
+                st.warning(f"Fiche introuvable sur FloreAlpes pour '{sp}'.")
 
         # ---- InfoFlora -------------------------------------------------------
         with tab_if:
@@ -186,7 +192,7 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
                 st.markdown(f"[Synthèse]({url_tb})")
                 st.components.v1.iframe(src=url_tb, height=600)
             else:
-                st.warning("Aucune correspondance via l’API eFlore.")
+                st.warning(f"Aucune correspondance via l’API eFlore pour '{sp}'.")
 
         # ---- OpenObs ---------------------------------------------------------
         with tab_obs:
