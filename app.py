@@ -12,6 +12,7 @@ Fonctionnement actualisé (v0.2)
   d’accueil (https://www.florealpes.com/index.php) puis soumet le champ `chaine`.
   Cela reproduit exactement le comportement utilisateur.
 * Le reste du workflow (InfoFlora, Tela Botanica, OpenObs, Biodiv’RA) est inchangé.
+* OpenObs utilise désormais le CD_REF de TaxRef si disponible.
 """
 
 from __future__ import annotations
@@ -20,15 +21,16 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from urllib.parse import quote_plus, urljoin # Ajout de urljoin
+from urllib.parse import quote_plus, urljoin
 
 # -----------------------------------------------------------------------------
 # Configuration globale
 # -----------------------------------------------------------------------------
 
 st.set_page_config(page_title="Auto-scraper espèces", layout="wide", page_icon="🌿")
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; AutoScraper/0.2; +https://github.com/ameten)"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
 
 # -----------------------------------------------------------------------------
@@ -41,7 +43,7 @@ def fetch_html(url: str, session: requests.Session | None = None) -> BeautifulSo
     sess = session or requests.Session()
     sess.headers.update(HEADERS)
     try:
-        r = sess.get(url, timeout=10)
+        r = sess.get(url, timeout=15)
         r.raise_for_status()
         return BeautifulSoup(r.text, "lxml")
     except requests.RequestException as e:
@@ -55,31 +57,30 @@ def florealpes_search(species: str) -> str | None:
     sess = requests.Session()
     sess.headers.update(HEADERS)
 
-    # 1) Accueil (récupération éventuelle des cookies PHPSESSID etc.)
     try:
         index_url = "https://www.florealpes.com/index.php"
         st.write(f"[FloreAlpes Debug] Accès à : {index_url}")
-        index_resp = sess.get(index_url, timeout=10)
+        index_resp = sess.get(index_url, timeout=15)
         index_resp.raise_for_status()
         st.write(f"[FloreAlpes Debug] index.php récupéré, statut : {index_resp.status_code}, URL finale: {index_resp.url}")
     except requests.RequestException as e:
         st.warning(f"Impossible de charger la page d'accueil de FloreAlpes : {e}")
         return None
 
-    # 2) Soumission du champ «chaine» — page résultat : recherche.php
     try:
         search_url_base = "https://www.florealpes.com/recherche.php"
-        params_florealpes = {"chaine": species, "OK": "OK"}
+        params_florealpes = {"chaine": species}
+        st.write(f"[FloreAlpes Debug] Paramètres de recherche : {params_florealpes}")
         
-        # Préparation de l'URL complète pour l'affichage debug
-        req = requests.Request('GET', search_url_base, params=params_florealpes).prepare()
-        st.write(f"[FloreAlpes Debug] Recherche : {req.url}")
-        
-        resp = sess.send(req, timeout=10) # Utilisation de send avec l'objet préparé
+        resp = sess.get(search_url_base, params=params_florealpes, timeout=15)
+        st.write(f"[FloreAlpes Debug] Réponse de la recherche URL demandée: {resp.request.url}")
+        st.write(f"[FloreAlpes Debug] Réponse de la recherche URL finale : {resp.url}, statut : {resp.status_code}")
         resp.raise_for_status()
-        st.write(f"[FloreAlpes Debug] Réponse de la recherche URL : {resp.url}, statut : {resp.status_code}")
 
-        # Vérification simple d'un message "aucun résultat"
+        if "florealpes.com" not in resp.url:
+            st.error(f"[FloreAlpes Debug] Redirection inattendue vers : {resp.url}. La recherche a échoué.")
+            return None
+
         if "aucun résultat à votre requête" in resp.text.lower() or "pas de résultats" in resp.text.lower():
             st.write(f"[FloreAlpes Debug] Message 'aucun résultat' trouvé pour '{species}'.")
             return None
@@ -92,12 +93,11 @@ def florealpes_search(species: str) -> str | None:
         
         if link_tag and link_tag.has_attr('href'):
             relative_url = link_tag['href']
-            # Construction de l'URL absolue avec https://www.florealpes.com/ comme base
             absolute_url = urljoin("https://www.florealpes.com/", relative_url)
             st.write(f"[FloreAlpes Debug] Lien trouvé : {absolute_url}")
             return absolute_url
         else:
-            st.write(f"[FloreAlpes Debug] Lien 'a[href^=fiche_]' non trouvé sur la page {resp.url}. Contenu (premiers 500 caractères) : {resp.text[:500]}")
+            st.write(f"[FloreAlpes Debug] Lien 'a[href^=fiche_]' non trouvé sur la page {resp.url}.")
             return None
             
     except requests.RequestException as e:
@@ -111,23 +111,20 @@ def florealpes_search(species: str) -> str | None:
 def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
     """Extrait l’image principale et le tableau des caractéristiques."""
     st.write(f"[FloreAlpes Scrape Debug] Grattage de l'URL : {url}")
-    soup = fetch_html(url) # fetch_html a déjà un st.warning en cas d'échec
+    soup = fetch_html(url)
     if soup is None:
         st.write(f"[FloreAlpes Scrape Debug] Échec du téléchargement ou de l'analyse de {url}")
         return None, None
 
-    # Image
     img_tag = soup.select_one("a[href$='.jpg'] img") or soup.select_one("img[src$='.jpg']")
     img_url = None
     if img_tag and img_tag.has_attr('src'):
         img_src_relative = img_tag['src']
-        # Les chemins d'images comme 'photos/XXXX.jpg' sont relatifs à la racine du site
         img_url = urljoin("https://www.florealpes.com/", img_src_relative)
         st.write(f"[FloreAlpes Scrape Debug] URL de l'image trouvée : {img_url}")
     else:
         st.write("[FloreAlpes Scrape Debug] Tag image non trouvé.")
 
-    # Tableau de caractéristiques
     data_tbl = None
     tbl = soup.find("table", class_="fiche")
     if tbl:
@@ -141,12 +138,9 @@ def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
             data_tbl = pd.DataFrame(rows, columns=["Attribut", "Valeur"])
             st.write(f"[FloreAlpes Scrape Debug] Tableau extrait avec {len(rows)} lignes.")
         else:
-            st.write("[FloreAlpes Scrape Debug] Tableau trouvé mais aucune ligne extraite (longueur 2).")
+            st.write("[FloreAlpes Scrape Debug] Tableau trouvé mais aucune ligne extraite.")
     else:
         st.write("[FloreAlpes Scrape Debug] Tableau 'table.fiche' non trouvé.")
-        # st.write(f"[FloreAlpes Scrape Debug] Contenu de la page (premiers 500 caractères) où le tableau est cherché : {soup.text[:500]}")
-
-
     return img_url, data_tbl
 
 
@@ -157,26 +151,115 @@ def infoflora_url(species: str) -> str:
 
 def tela_botanica_url(species: str) -> str | None:
     """Interroge l’API eFlore pour récupérer l’identifiant num_nomen."""
-    api = (
+    api_url = (
         "https://api.tela-botanica.org/service:eflore:0.1/" "names:search?mode=exact&taxon="
         f"{quote_plus(species)}"
     )
+    st.write(f"[Tela Botanica Debug] Interrogation API eFlore : {api_url}")
     try:
-        data = requests.get(api, headers=HEADERS, timeout=10).json()
+        s = requests.Session()
+        s.headers.update(HEADERS)
+        response = s.get(api_url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
         if not data:
+            st.write(f"[Tela Botanica Debug] Aucune donnée retournée par l'API eFlore pour '{species}'.")
             return None
-        nn = data[0].get("num_nomen")
-        return f"https://www.tela-botanica.org/bdtfx-nn-{nn}-synthese" if nn else None
-    except requests.RequestException:
+        
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+            nn = data[0].get("num_nomen")
+            if nn:
+                st.write(f"[Tela Botanica Debug] num_nomen trouvé pour '{species}': {nn}")
+                return f"https://www.tela-botanica.org/bdtfx-nn-{nn}-synthese"
+            else:
+                st.warning(f"[Tela Botanica Debug] 'num_nomen' non trouvé dans la réponse API pour '{species}'. Réponse: {data[0]}")
+                return None
+        else:
+            st.warning(f"[Tela Botanica Debug] Réponse API eFlore inattendue pour '{species}': {data}")
+            return None
+    except requests.RequestException as e:
+        st.warning(f"[Tela Botanica Debug] Erreur RequestException API eFlore pour '{species}': {e}")
+        if e.response is not None:
+            st.write(f"[Tela Botanica Debug] Contenu de la réponse d'erreur eFlore : {e.response.text}")
+        return None
+    except ValueError as e: # Erreur de décodage JSON
+        st.warning(f"[Tela Botanica Debug] Erreur décodage JSON API eFlore pour '{species}': {e}. Réponse brute: {response.text if 'response' in locals() else 'N/A'}")
         return None
 
+# Nouvelle fonction pour obtenir le CD_REF de TaxRef
+def get_taxref_cd_ref(species_name: str) -> str | None:
+    """Interroge l'API TaxRef pour récupérer le CD_REF (id TaxRef)."""
+    st.write(f"[TaxRef API Debug] Recherche du CD_REF pour : {species_name}")
+    taxref_api_url = "https://taxref.mnhn.fr/api/taxa/search"
+    params = {
+        "scientificNames": species_name,
+        "territories": "fr", # France métropolitaine et outre-mer. Utiliser "met" pour métropole uniquement.
+        "page": 1,
+        "size": 5 
+    }
+    st.write(f"[TaxRef API Debug] URL API TaxRef : {taxref_api_url}, Paramètres : {params}")
+    
+    try:
+        s = requests.Session()
+        s.headers.update(HEADERS)
+        response = s.get(taxref_api_url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
 
+        if data and "_embedded" in data and "taxa" in data["_embedded"] and data["_embedded"]["taxa"]:
+            found_taxon = None
+            # Chercher une correspondance exacte du nom scientifique (insensible à la casse et aux espaces)
+            normalized_species_name = species_name.strip().lower()
+            for taxon_candidate in data["_embedded"]["taxa"]:
+                if taxon_candidate.get("scientificName","").strip().lower() == normalized_species_name:
+                    found_taxon = taxon_candidate
+                    st.write(f"[TaxRef API Debug] Correspondance exacte trouvée : {found_taxon.get('scientificName')}")
+                    break
+            
+            if not found_taxon: # Si pas de correspondance exacte, prendre le premier résultat
+                found_taxon = data["_embedded"]["taxa"][0]
+                st.write(f"[TaxRef API Debug] Pas de correspondance exacte pour '{species_name}', utilisation du premier taxon : {found_taxon.get('scientificName')}")
+
+            cd_ref = found_taxon.get("id")
+            if cd_ref:
+                st.write(f"[TaxRef API Debug] CD_REF trouvé pour '{species_name}' (taxon: {found_taxon.get('scientificName')}): {cd_ref}")
+                return str(cd_ref)
+            else:
+                st.warning(f"[TaxRef API Debug] CD_REF (champ 'id') non trouvé pour '{found_taxon.get('scientificName', 'N/A')}'. Réponse: {found_taxon}")
+                return None
+        else:
+            st.warning(f"[TaxRef API Debug] Aucune donnée '_embedded.taxa' trouvée pour '{species_name}'. Réponse: {data}")
+            return None
+    except requests.RequestException as e:
+        st.warning(f"[TaxRef API Debug] Erreur API TaxRef (RequestException) pour '{species_name}': {e}")
+        if e.response is not None:
+            st.write(f"[TaxRef API Debug] Contenu de la réponse d'erreur TaxRef : {e.response.text}")
+        return None
+    except ValueError as e: # JSONDecodeError
+        st.warning(f"[TaxRef API Debug] Erreur décodage JSON API TaxRef pour '{species_name}': {e}. Réponse brute: {response.text if 'response' in locals() else 'N/A'}")
+        return None
+
+# Mise à jour de openobs_embed
 def openobs_embed(species: str) -> str:
-    """HTML pour afficher la carte OpenObs dans un iframe."""
-    return (
-        "<iframe src='https://openobs.mnhn.fr/map.html?sp="
-        f"{quote_plus(species)}' width='100%' height='500' frameborder='0'></iframe>"
-    )
+    """HTML pour afficher la carte OpenObs dans un iframe en utilisant le CD_REF."""
+    st.write(f"[OpenObs Debug] Tentative de génération de l'iframe pour : {species}")
+    cd_ref = get_taxref_cd_ref(species)
+    
+    if cd_ref:
+        iframe_url = f"https://openobs.mnhn.fr/redirect/inpn/taxa/{cd_ref}?view=map"
+        st.write(f"[OpenObs Debug] URL Iframe OpenObs (avec CD_REF {cd_ref}) : {iframe_url}")
+        return f"<iframe src='{iframe_url}' width='100%' height='500' frameborder='0'></iframe>"
+    else:
+        st.warning(f"[OpenObs Debug] CD_REF non trouvé pour '{species}'. Tentative avec l'ancienne méthode OpenObs.")
+        old_iframe_url = f"https://openobs.mnhn.fr/map.html?sp={quote_plus(species)}"
+        st.write(f"[OpenObs Debug] URL Iframe OpenObs (ancienne méthode) : {old_iframe_url}")
+        return (
+            f"<p style='color: orange; border: 1px solid orange; padding: 5px;'>"
+            f"Avertissement : L'identifiant TaxRef (CD_REF) pour '{species}' n'a pas pu être récupéré. "
+            f"Tentative d'affichage de la carte OpenObs avec l'ancienne méthode (peut être moins précise ou obsolète).</p>"
+            f"<iframe src='{old_iframe_url}' width='100%' height='500' frameborder='0'></iframe>"
+        )
 
 
 def biodivra_url(species: str) -> str:
@@ -198,10 +281,15 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
 
     for sp in species_list:
         st.subheader(sp)
-        # Ajout d'un expander pour les logs de débogage de FloreAlpes
-        with st.expander(f"Logs de débogage FloreAlpes pour {sp}", expanded=False):
-            # Les st.write des fonctions seront affichés ici si appelés dans ce contexte
-            pass
+        # L'expander peut être utilisé pour regrouper les logs si on gère leur affichage de manière plus ciblée
+        # Pour l'instant, les logs apparaissent au fur et à mesure des appels de st.write()
+        with st.expander(f"Afficher/Masquer les logs de débogage pour {sp}", expanded=False):
+            # Les st.write des fonctions s'afficheront ici si l'expander est ouvert AU MOMENT où ils sont émis,
+            # ou de manière générale dans le flux si l'expander n'est pas utilisé pour capturer la sortie.
+            # Tel quel, cet expander ne capture pas les logs des fonctions appelées plus bas.
+            # Les logs s'afficheront globalement sous l'onglet où ils sont générés.
+            st.text("Les logs détaillés des APIs (FloreAlpes, TaxRef, etc.) s'affichent ci-dessous.")
+
 
         tab_fa, tab_if, tab_tb, tab_obs, tab_bio = st.tabs(
             [
@@ -213,14 +301,12 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
             ]
         )
 
-        # ---- FloreAlpes ------------------------------------------------------
         with tab_fa:
-            st.write(f"Recherche de '{sp}' sur FloreAlpes...")
-            url_fa = florealpes_search(sp) # Les logs de cette fonction s'afficheront
+            # Les st.write de florealpes_search et scrape_florealpes s'afficheront ici.
+            url_fa = florealpes_search(sp)
             if url_fa:
-                st.success(f"URL FloreAlpes trouvée : {url_fa}")
                 st.markdown(f"[Fiche complète]({url_fa})")
-                img, tbl = scrape_florealpes(url_fa) # Les logs de cette fonction s'afficheront
+                img, tbl = scrape_florealpes(url_fa)
                 if img:
                     st.image(img, caption=sp, use_column_width=True)
                 else:
@@ -232,16 +318,15 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
                 else:
                     st.warning("Tableau des caractéristiques non trouvé sur la fiche FloreAlpes.")
             else:
-                st.error(f"Fiche introuvable sur FloreAlpes pour '{sp}'. Vérifiez les logs de débogage ci-dessus.")
+                st.error(f"Fiche introuvable sur FloreAlpes pour '{sp}'.") # Les logs sont déjà affichés par la fonction
 
-        # ---- InfoFlora -------------------------------------------------------
         with tab_if:
             url_if = infoflora_url(sp)
             st.markdown(f"[Fiche InfoFlora]({url_if})")
             st.components.v1.iframe(src=url_if, height=600)
 
-        # ---- Tela Botanica ---------------------------------------------------
         with tab_tb:
+            # Les st.write de tela_botanica_url s'afficheront ici.
             url_tb = tela_botanica_url(sp)
             if url_tb:
                 st.markdown(f"[Synthèse]({url_tb})")
@@ -249,12 +334,11 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
             else:
                 st.warning(f"Aucune correspondance via l’API eFlore pour '{sp}'.")
 
-        # ---- OpenObs ---------------------------------------------------------
         with tab_obs:
             st.write("Répartition nationale (OpenObs)")
-            st.components.v1.html(openobs_embed(sp), height=600, scrolling=True)
+            # Les st.write de openobs_embed (et get_taxref_cd_ref) s'afficheront ici.
+            st.components.v1.html(openobs_embed(sp), height=650, scrolling=True) # Hauteur augmentée pour le message d'avertissement potentiel
 
-        # ---- Biodiv'RA -------------------------------------------------------
         with tab_bio:
             url_bio = biodivra_url(sp)
             st.markdown(f"[Accéder à l’atlas]({url_bio})")
