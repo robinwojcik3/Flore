@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -6,12 +7,15 @@ Streamlit app : récupération automatisée d’informations botaniques
 Auteur : Robin Wojcik (Améten)
 Date   : 2025-05-27
 
-Fonctionnement actualisé (v0.2)
+Fonctionnement révisé (v0.3)
 --------------------------------
-* La recherche FloreAlpes passe désormais **obligatoirement** par la page
-  d’accueil (https://www.florealpes.com/index.php) puis soumet le champ `chaine`.
-  Cela reproduit exactement le comportement utilisateur.
-* Le reste du workflow (InfoFlora, Tela Botanica, OpenObs, Biodiv’RA) est inchangé.
+* Recherche FloreAlpes corrigée : utilise désormais le champ rapide
+  `?chaine=` de la page d’accueil (redirige sur la fiche si match unique, ou
+  sur la page résultat sinon). Plus robuste que l’interrogation directe
+  `recherche.php`.
+* Aucune dépendance Selenium → pleinement compatible Streamlit Cloud.
+
+Dépendances : voir `requirements.txt` (streamlit, pandas, requests, bs4, lxml).
 """
 
 from __future__ import annotations
@@ -28,8 +32,9 @@ from urllib.parse import quote_plus
 
 st.set_page_config(page_title="Auto-scraper espèces", layout="wide", page_icon="🌿")
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; AutoScraper/0.2; +https://github.com/ameten)"
+    "User-Agent": "Mozilla/5.0 (compatible; AutoScraper/0.3; +https://github.com/ameten)"
 }
+TIMEOUT = 10
 
 # -----------------------------------------------------------------------------
 # Fonctions utilitaires
@@ -41,7 +46,7 @@ def fetch_html(url: str, session: requests.Session | None = None) -> BeautifulSo
     sess = session or requests.Session()
     sess.headers.update(HEADERS)
     try:
-        r = sess.get(url, timeout=10)
+        r = sess.get(url, timeout=TIMEOUT)
         r.raise_for_status()
         return BeautifulSoup(r.text, "lxml")
     except requests.RequestException:
@@ -49,34 +54,39 @@ def fetch_html(url: str, session: requests.Session | None = None) -> BeautifulSo
 
 
 def florealpes_search(species: str) -> str | None:
-    """Reproduction exacte de la recherche via le formulaire FloreAlpes."""
+    """
+    Renvoie l’URL de la fiche FloreAlpes via la *Recherche rapide*.
 
+    Stratégie :
+    1. GET https://www.florealpes.com/index.php?chaine=<species>
+       - si la réponse est déjà une fiche (URL contient 'fiche_'), on la retourne.
+       - sinon, parse la page pour récupérer le premier lien 'fiche_'.
+    Cette méthode imite exactement le formulaire visible dans la capture.
+    """
     sess = requests.Session()
     sess.headers.update(HEADERS)
 
-    # 1) Accueil (récupération éventuelle des cookies PHPSESSID etc.)
     try:
-        sess.get("https://www.florealpes.com/index.php", timeout=10)
-    except requests.RequestException:
-        st.warning("Impossible de charger la page d'accueil de FloreAlpes.")
-        return None
-
-    # 2) Soumission du champ «chaine» — page résultat : recherche.php
-    try:
-        # Paramètres corrigés pour correspondre au formulaire du site
-        params_florealpes = {"chaine": species, "OK": "OK"}
         resp = sess.get(
-            "https://www.florealpes.com/recherche.php",
-            params=params_florealpes,
-            timeout=10,
+            "https://www.florealpes.com/index.php",
+            params={"chaine": species},
+            timeout=TIMEOUT,
+            allow_redirects=True,
         )
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-        link = soup.select_one("a[href^='fiche_']")
-        return f"https://www.florealpes.com/{link['href'].lstrip('/')}" if link and link.has_attr('href') else None
     except requests.RequestException:
-        st.warning(f"Erreur lors de la recherche de '{species}' sur FloreAlpes.")
         return None
+
+    # Si redirection directe vers la fiche (URL finale contient 'fiche_')
+    if "fiche_" in resp.url:
+        return resp.url
+
+    # Sinon, on cherche dans le HTML la première fiche
+    soup = BeautifulSoup(resp.text, "lxml")
+    link = soup.select_one("a[href^='fiche_']")
+    if link:
+        return f"https://www.florealpes.com/{link['href']}"
+    return None
 
 
 def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
@@ -85,13 +95,13 @@ def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
     if soup is None:
         return None, None
 
-    # Image
+    # Image (premier jpg de la fiche)
     img_tag = soup.select_one("a[href$='.jpg'] img") or soup.select_one("img[src$='.jpg']")
     img_url = (
-        f"https://www.florealpes.com/{img_tag['src'].lstrip('/')}" if img_tag and img_tag.has_attr('src') else None
+        f"https://www.florealpes.com/{img_tag['src'].lstrip('/')}" if img_tag else None
     )
 
-    # Tableau de caractéristiques
+    # Tableau de caractéristiques (table.fiche)
     data_tbl = None
     tbl = soup.find("table", class_="fiche")
     if tbl:
@@ -114,11 +124,12 @@ def infoflora_url(species: str) -> str:
 def tela_botanica_url(species: str) -> str | None:
     """Interroge l’API eFlore pour récupérer l’identifiant num_nomen."""
     api = (
-        "https://api.tela-botanica.org/service:eflore:0.1/" "names:search?mode=exact&taxon="
+        "https://api.tela-botanica.org/service:eflore:0.1/"
+        "names:search?mode=exact&taxon="
         f"{quote_plus(species)}"
     )
     try:
-        data = requests.get(api, headers=HEADERS, timeout=10).json()
+        data = requests.get(api, headers=HEADERS, timeout=TIMEOUT).json()
         if not data:
             return None
         nn = data[0].get("num_nomen")
@@ -137,6 +148,7 @@ def openobs_embed(species: str) -> str:
 
 def biodivra_url(species: str) -> str:
     return f"https://atlas.biodiversite-auvergne-rhone-alpes.fr/recherche?keyword={quote_plus(species)}"
+
 
 # -----------------------------------------------------------------------------
 # Interface utilisateur
@@ -164,7 +176,7 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
             ]
         )
 
-        # ---- FloreAlpes ------------------------------------------------------
+        # ---- FloreAlpes ----
         with tab_fa:
             url_fa = florealpes_search(sp)
             if url_fa:
@@ -174,35 +186,34 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
                     st.image(img, caption=sp, use_column_width=True)
                 if tbl is not None:
                     st.dataframe(tbl, hide_index=True)
-                else:
-                    st.info("Tableau des caractéristiques non trouvé sur la fiche FloreAlpes.")
             else:
-                st.warning(f"Fiche introuvable sur FloreAlpes pour '{sp}'.")
+                st.warning("Fiche introuvable sur FloreAlpes.")
 
-        # ---- InfoFlora -------------------------------------------------------
+        # ---- InfoFlora ----
         with tab_if:
             url_if = infoflora_url(sp)
             st.markdown(f"[Fiche InfoFlora]({url_if})")
             st.components.v1.iframe(src=url_if, height=600)
 
-        # ---- Tela Botanica ---------------------------------------------------
+        # ---- Tela Botanica ----
         with tab_tb:
             url_tb = tela_botanica_url(sp)
             if url_tb:
                 st.markdown(f"[Synthèse]({url_tb})")
                 st.components.v1.iframe(src=url_tb, height=600)
             else:
-                st.warning(f"Aucune correspondance via l’API eFlore pour '{sp}'.")
+                st.warning("Aucune correspondance via l’API eFlore.")
 
-        # ---- OpenObs ---------------------------------------------------------
+        # ---- OpenObs ----
         with tab_obs:
             st.write("Répartition nationale (OpenObs)")
             st.components.v1.html(openobs_embed(sp), height=600, scrolling=True)
 
-        # ---- Biodiv'RA -------------------------------------------------------
+        # ---- Biodiv'RA ----
         with tab_bio:
             url_bio = biodivra_url(sp)
             st.markdown(f"[Accéder à l’atlas]({url_bio})")
             st.components.v1.iframe(src=url_bio, height=600)
 else:
     st.info("Saisissez au moins une espèce pour démarrer la recherche.")
+```
