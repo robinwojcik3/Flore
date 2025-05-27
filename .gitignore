@@ -1,0 +1,12 @@
+# Environnements Python
+env/
+.venv/
+__pycache__/
+
+# Fichiers Streamlit
+.streamlit/credentials.toml
+.streamlit/secrets.toml
+
+# Autres
+*.pyc
+.DS_Store
