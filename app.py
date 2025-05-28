@@ -4,17 +4,17 @@
 Streamlit app : récupération automatisée d’informations botaniques
 
 Auteur : Robin Wojcik (Améten)
-Date   : 2025-05-28 (v0.9.2 - Nouvelle URL OpenObs avec zoom et iframe agrandi)
+Date   : 2025-05-28 (v0.9.3 - Augmentation hauteur iframes des onglets)
 
-Fonctionnement actualisé (v0.9.2)
+Fonctionnement actualisé (v0.9.3)
 ----------------------------------
 * Mode débogage activable via `?debug=true` dans l'URL pour des logs plus détaillés.
 * Logique de scraping pour FloreAlpes (requests+BeautifulSoup) maintenue et commentée.
-* Sélecteurs d'images et extraction de tableaux légèrement affinés.
 * Récupération des CD_REF via un fichier CSV local "DATA_CD_REF.csv" avec détection améliorée du délimiteur.
 * Ajout d'un onglet pour afficher les informations de l'INPN.
 * Utilisation d'une nouvelle URL OpenObs permettant de spécifier une emprise géographique (WKT).
-* Augmentation de la taille par défaut de l'iframe de la carte OpenObs et ajout de `allow="fullscreen"`.
+* Augmentation de la taille par défaut de l'iframe de la carte OpenObs principale.
+* Augmentation significative de la hauteur des iframes dans les onglets (InfoFlora, Tela Botanica, Biodiv'AURA, INPN).
 """
 
 from __future__ import annotations
@@ -44,6 +44,9 @@ DEFAULT_OPENOBS_BOUNDS = {
     "max_lon": 8.023016229271889,
     "max_lat": 46.64266530624121
 }
+
+# Nouvelle hauteur pour les iframes dans les onglets
+IFRAME_TAB_HEIGHT = 2500 # px
 
 def is_debug_mode() -> bool:
     try:
@@ -90,7 +93,7 @@ def load_cd_ref_data(csv_path: str) -> pd.DataFrame | None:
                     df = temp_df[["CD_REF", "NOM LATIN"]].copy()
                     if DEBUG_MODE: st.info(f"[DEBUG load_cd_ref_data] Colonnes renommées en 'CD_REF', 'NOM LATIN' avec délimiteur '{repr(delimiter)}'.")
                     break
-            df = None # Si conditions non remplies, réinitialiser pour le prochain délimiteur
+            df = None 
         except pd.errors.EmptyDataError:
             st.error(f"Fichier CSV '{csv_path}' est vide.")
             return None
@@ -122,7 +125,7 @@ def load_cd_ref_data(csv_path: str) -> pd.DataFrame | None:
 TAXREF_DATA = load_cd_ref_data(CD_REF_CSV_PATH)
 
 # -----------------------------------------------------------------------------
-# Fonctions utilitaires (inchangées par rapport à v0.9.2, sauf openobs_embed)
+# Fonctions utilitaires
 # -----------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False, ttl=86_400)
@@ -189,7 +192,7 @@ def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
         if img_tag := soup.select_one(selector):
             if img_tag.has_attr('src'):
                 try:
-                    if int(str(img_tag.get('width', '9999')).replace('px','')) > 50 :
+                    if int(str(img_tag.get('width', '9999')).replace('px','')) > 50 : 
                         img_url = urljoin(url, img_tag['src'])
                         if DEBUG_MODE: st.info(f"[DEBUG scrape_florealpes] Image trouvée (sélecteur '{selector}'): {img_url}"); break 
                 except ValueError: 
@@ -251,34 +254,27 @@ def get_cd_ref_from_csv(species_name: str) -> str | None:
         return None
 
 def openobs_embed(species: str) -> str:
-    """Génère le HTML pour l'iframe OpenObs, utilisant la nouvelle URL avec WKT si CD_REF disponible."""
     cd_ref = get_cd_ref_from_csv(species)
     if cd_ref:
         b = DEFAULT_OPENOBS_BOUNDS
-        wkt_polygon = (
-            f"MULTIPOLYGON((("
-            f"{b['min_lon']}+{b['max_lat']},"
-            f"{b['min_lon']}%20{b['min_lat']},"
-            f"{b['max_lon']}%20{b['min_lat']},"
-            f"{b['max_lon']}%20{b['max_lat']},"
-            f"{b['min_lon']}%20{b['max_lat']}"
-            f")))"
-        )
+        wkt_polygon = (f"MULTIPOLYGON((("
+                       f"{b['min_lon']}+{b['max_lat']},"
+                       f"{b['min_lon']}%20{b['min_lat']},"
+                       f"{b['max_lon']}%20{b['min_lat']},"
+                       f"{b['max_lon']}%20{b['max_lat']},"
+                       f"{b['min_lon']}%20{b['max_lat']}"
+                       f")))")
         q_param = f"lsid%3A{cd_ref}%20AND%20(dynamicProperties_diffusionGP%3A%22true%22)"
-        iframe_url = (
-            f"https://openobs.mnhn.fr/openobs-hub/occurrences/search"
-            f"?q={q_param}&qc=&wkt={wkt_polygon}#tab_mapView"
-        )
+        iframe_url = (f"https://openobs.mnhn.fr/openobs-hub/occurrences/search"
+                      f"?q={q_param}&qc=&wkt={wkt_polygon}#tab_mapView")
         if DEBUG_MODE: st.info(f"[DEBUG OpenObs] Utilisation nouvelle URL OpenObs (CD_REF {cd_ref}, WKT). URL: {iframe_url}")
         return f"<iframe src='{iframe_url}' width='100%' height='100%' frameborder='0' style='min-height: 650px;' allow='fullscreen'></iframe>"
     else: 
         st.warning(f"[OpenObs] CD_REF non trouvé pour '{species}'. Utilisation ancienne URL OpenObs par nom.")
-        fallback_url = f"https://openobs.mnhn.fr/map.html?sp={quote_plus(species)}" # Fallback sans WKT
-        return (
-            f"<p style='color: orange; border: 1px solid orange; padding: 5px; border-radius: 3px;'>"
-            f"Avertissement : CD_REF pour '{species}' non récupéré. Carte OpenObs basée sur recherche par nom simple.</p>"
-            f"<iframe src='{fallback_url}' width='100%' height='100%' frameborder='0' style='min-height: 400px;' allow='fullscreen'></iframe>"
-        )
+        fallback_url = f"https://openobs.mnhn.fr/map.html?sp={quote_plus(species)}"
+        return (f"<p style='color: orange; border: 1px solid orange; padding: 5px; border-radius: 3px;'>"
+                f"Avertissement : CD_REF pour '{species}' non récupéré. Carte OpenObs basée sur recherche par nom simple.</p>"
+                f"<iframe src='{fallback_url}' width='100%' height='100%' frameborder='0' style='min-height: 400px;' allow='fullscreen'></iframe>")
 
 def biodivaura_url(species: str) -> str:
     cd_ref = get_cd_ref_from_csv(species)
@@ -343,7 +339,7 @@ if st.session_state.button_clicked and input_txt.strip():
             st.markdown("##### 🗺️ Carte de répartition (OpenObs)")
             with st.spinner(f"Chargement carte OpenObs pour '{sp}'..."):
                 html_openobs_main = openobs_embed(sp)
-            st.components.v1.html(html_openobs_main, height=650) # Hauteur augmentée
+            st.components.v1.html(html_openobs_main, height=650) 
 
         with col_intro:
             st.markdown("##### ℹ️ Sources d'Information")
@@ -369,7 +365,7 @@ if st.session_state.button_clicked and input_txt.strip():
             st.markdown("##### InfoFlora")
             url_if = infoflora_url(sp); st.markdown(f"**InfoFlora** : [Fiche complète]({url_if})")
             with st.spinner(f"Chargement page InfoFlora pour '{sp}'..."):
-                st.components.v1.iframe(src=url_if, height=600, scrolling=True)
+                st.components.v1.iframe(src=url_if, height=IFRAME_TAB_HEIGHT, scrolling=True) # Hauteur modifiée
 
         with tabs[2]: # Tela Botanica
             st.markdown("##### Tela Botanica (eFlore)")
@@ -377,7 +373,7 @@ if st.session_state.button_clicked and input_txt.strip():
             if url_tb:
                 st.markdown(f"**Tela Botanica** : [Synthèse eFlore]({url_tb})")
                 with st.spinner(f"Chargement page Tela Botanica pour '{sp}'..."):
-                    st.components.v1.iframe(src=url_tb, height=600, scrolling=True)
+                    st.components.v1.iframe(src=url_tb, height=IFRAME_TAB_HEIGHT, scrolling=True) # Hauteur modifiée
             else: st.warning(f"Aucune correspondance API eFlore (Tela Botanica) pour '{sp}'.")
 
         with tabs[3]: # Biodiv'AURA
@@ -385,7 +381,7 @@ if st.session_state.button_clicked and input_txt.strip():
             with st.spinner(f"Recherche Biodiv'AURA Atlas pour '{sp}'..."): url_ba = biodivaura_url(sp)
             st.markdown(f"**Biodiv'AURA** : [Accéder à l’atlas]({url_ba})")
             with st.spinner(f"Chargement page Biodiv'AURA pour '{sp}'..."):
-                st.components.v1.iframe(src=url_ba, height=600, scrolling=True)
+                st.components.v1.iframe(src=url_ba, height=IFRAME_TAB_HEIGHT, scrolling=True) # Hauteur modifiée
         
         with tabs[4]: # INPN
             st.markdown("##### INPN - Inventaire National du Patrimoine Naturel")
@@ -394,7 +390,7 @@ if st.session_state.button_clicked and input_txt.strip():
                 st.markdown(f"**INPN** : [Fiche espèce INPN]({url_inpn})")
                 if "cd_nom" in url_inpn: 
                     with st.spinner(f"Chargement page INPN pour '{sp}'..."):
-                        st.components.v1.iframe(src=url_inpn, height=600, scrolling=True)
+                        st.components.v1.iframe(src=url_inpn, height=IFRAME_TAB_HEIGHT, scrolling=True) # Hauteur modifiée
                 else: st.info("URL INPN est une page de recherche. Affichage direct non tenté. Utilisez lien.")
             else: st.error(f"Impossible de générer lien INPN pour '{sp}'.")
         st.markdown("---")
