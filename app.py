@@ -4,15 +4,15 @@
 Streamlit app : récupération automatisée d’informations botaniques
 
 Auteur : Robin Wojcik (Améten)
-Date   : 2025-05-28 (Requests pour FloreAlpes avec sélecteurs précis)
+Date   : 2025-05-28 (FloreAlpes - logique "première option" affinée)
 
-Fonctionnement actualisé (v0.6 - FloreAlpes avec sélecteurs utilisateur)
+Fonctionnement actualisé (v0.7 - FloreAlpes "première option" robuste)
 --------------------------------------------------------------------
-* La recherche FloreAlpes (requests+BeautifulSoup) suit les sélecteurs CSS
-  spécifiques fournis par l'utilisateur pour identifier la "première option"
-  sur la page de résultats.
-* Maintien des fallbacks pour la recherche de lien FloreAlpes.
-* Les autres modules (InfoFlora, Tela Botanica, OpenObs, Biodiv'AURA) sont inchangés.
+* FloreAlpes: Logique améliorée pour trouver le lien de la "première option"
+  sur la page de résultats, en parcourant les lignes de la table de résultats
+  plutôt qu'en se fiant à des sélecteurs :nth-child stricts.
+* Nettoyage mineur de l'extraction de texte dans scrape_florealpes.
+* Les autres modules restent inchangés.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ HEADERS = {
 
 @st.cache_data(show_spinner=False, ttl=86_400)
 def fetch_html(url: str, session: requests.Session | None = None) -> BeautifulSoup | None:
-    """Télécharge une page et renvoie son contenu analysé par BeautifulSoup."""
     sess = session or requests.Session()
     sess.headers.update(HEADERS)
     try:
@@ -52,23 +51,18 @@ def fetch_html(url: str, session: requests.Session | None = None) -> BeautifulSo
 
 @st.cache_data(show_spinner=False, ttl=86_400)
 def florealpes_search(species: str) -> str | None:
-    """
-    Recherche une espèce sur FloreAlpes (requests+BeautifulSoup) en suivant les instructions
-    et sélecteurs spécifiques pour trouver la "première option" de résultat.
-    """
     session = requests.Session()
     session.headers.update(HEADERS)
     base_url = "https://www.florealpes.com/"
     current_page_url_for_error_reporting = base_url 
 
     try:
-        # 1. Accès optionnel à la page d'accueil
         try:
             session.get(base_url, timeout=10).raise_for_status()
-        except requests.RequestException as e:
-            st.info(f"[FloreAlpes Requests] Avertissement: Page d'accueil ({base_url}) non chargée: {e}")
+        except requests.RequestException:
+            # Pas critique si la page d'accueil ne charge pas, le message est déjà géré par st.info/warning si besoin
+            pass
 
-        # 2. Soumission de la recherche à recherche.php
         search_url = urljoin(base_url, "recherche.php")
         search_params = {"chaine": species}
         results_response = session.get(search_url, params=search_params, timeout=15)
@@ -77,7 +71,6 @@ def florealpes_search(species: str) -> str | None:
         current_page_url_for_error_reporting = results_response.url
         soup = BeautifulSoup(results_response.text, "lxml")
 
-        # 3. Vérification "aucun résultat"
         page_text_lower = results_response.text.lower()
         no_results_messages = [
             "aucun résultat à votre requête", 
@@ -85,42 +78,40 @@ def florealpes_search(species: str) -> str | None:
             "aucun taxon ne correspond à votre recherche"
         ]
         if any(msg in page_text_lower for msg in no_results_messages):
-            st.info(f"[FloreAlpes Requests] Aucun résultat trouvé pour '{species}'.")
+            st.info(f"[FloreAlpes] Aucun résultat trouvé pour '{species}'.")
             return None
 
-        # 4. Sélection de la "première option" en utilisant les sélecteurs CSS
         link_tag = None
         
-        # Priorité aux sélecteurs précis inspirés par l'utilisateur ciblant la première option de résultat.
-        # `tr:nth-child(1)` ou `tr:nth-child(2)` peuvent correspondre à la 1ère ligne de données
-        # selon la présence d'un <thead> ou si tbody est implicite.
-        # Le sélecteur le plus général `#principal div.conteneur_tab table tr td.symb a[href^='fiche_']`
-        # trouvera le premier lien de ce type dans la structure attendue.
+        # Tentative 1: Trouver la table des résultats et le lien de la première option pertinente
+        # Cible: #principal div.conteneur_tab table.resultats (ou table générique si non trouvée)
+        results_table_container = soup.select_one("#principal div.conteneur_tab")
+        results_table = None
+        if results_table_container:
+            results_table = results_table_container.select_one("table.resultats")
+            if not results_table: # Fallback si table.resultats n'est pas trouvée dans le conteneur
+                results_table = results_table_container.select_one("table")
         
-        # Sélecteurs pour le lien <a> de la "première option" (liste ordonnée par priorité/spécificité)
-        # Ces sélecteurs tentent de capturer la "première ligne de résultat pertinente"
-        selectors_for_first_option = [
-            "#principal div.conteneur_tab table > tbody > tr:nth-child(1) > td.symb > a[href^='fiche_']", # Avec tbody explicite, 1er tr de tbody
-            "#principal div.conteneur_tab table > tr:nth-child(1) > td.symb > a[href^='fiche_']",       # Sans tbody explicite, 1er tr global
-            "#principal div.conteneur_tab table > tbody > tr:nth-child(2) > td.symb > a[href^='fiche_']", # Avec tbody explicite, 2e tr (si 1er est un entête)
-            "#principal div.conteneur_tab table > tr:nth-child(2) > td.symb > a[href^='fiche_']",       # Sans tbody explicite, 2e tr global
-            "#principal div.conteneur_tab table td.symb a[href^='fiche_']" # Le premier lien dans n'importe quelle ligne de la table spécifiée
-        ]
-        
-        for selector in selectors_for_first_option:
-            link_tag = soup.select_one(selector)
-            if link_tag:
-                st.info(f"[FloreAlpes Requests] Lien trouvé avec sélecteur '{selector}' pour '{species}'.")
-                break
+        if results_table:
+            # Parcourir les lignes (<tbody><tr> ou <tr> directes)
+            # et prendre le premier lien 'fiche_' dans un 'td.symb'
+            # Ceci correspond à la "première option"
+            data_rows = results_table.select("tbody > tr, tr") 
+            for row in data_rows:
+                link_in_row = row.select_one("td.symb > a[href^='fiche_']")
+                if link_in_row:
+                    link_tag = link_in_row
+                    st.info(f"[FloreAlpes] Lien de la 'première option' trouvé pour '{species}'.")
+                    break 
         
         if link_tag and link_tag.has_attr('href'):
             relative_url = link_tag['href']
             absolute_url = urljoin(results_response.url, relative_url)
             return absolute_url
         else:
-            # Fallback 1: si l'URL actuelle est déjà une fiche (redirection directe)
+            # Fallback 1: l'URL actuelle est déjà une fiche (redirection directe)
             if "fiche_" in results_response.url and ".php" in results_response.url:
-                st.info(f"[FloreAlpes Requests] Redirection directe vers la fiche (fallback 1) pour '{species}': {results_response.url}")
+                st.info(f"[FloreAlpes] URL actuelle est déjà une fiche (fallback 1) pour '{species}': {results_response.url}")
                 return results_response.url
 
             # Fallback 2: premier lien 'fiche_' générique sur la page
@@ -128,21 +119,20 @@ def florealpes_search(species: str) -> str | None:
             if generic_link_tag and generic_link_tag.has_attr('href'):
                 relative_url = generic_link_tag['href']
                 absolute_url = urljoin(results_response.url, relative_url)
-                st.warning(f"[FloreAlpes Requests] Sélecteurs spécifiques non trouvés. Utilisation du 1er lien 'fiche_' générique (fallback 2) pour '{species}': {absolute_url}")
+                st.warning(f"[FloreAlpes] Logique 'première option' échouée. Utilisation du 1er lien 'fiche_' générique (fallback 2) pour '{species}': {absolute_url}")
                 return absolute_url
             
-            st.error(f"[FloreAlpes Requests] Impossible de trouver le lien de la fiche pour '{species}'.")
+            st.error(f"[FloreAlpes] Impossible de trouver le lien de la fiche pour '{species}'.")
             return None
 
     except requests.RequestException as e:
-        st.error(f"[FloreAlpes Requests] Erreur requête pour '{species}': {e}")
+        st.error(f"[FloreAlpes] Erreur de requête pour '{species}': {e}")
         return None
     except Exception as e:
-        st.error(f"[FloreAlpes Requests] Erreur inattendue pour '{species}': {e} (URL: {current_page_url_for_error_reporting})")
+        st.error(f"[FloreAlpes] Erreur inattendue pour '{species}': {e} (URL: {current_page_url_for_error_reporting})")
         return None
 
 def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
-    """Extrait l’image principale et le tableau des caractéristiques."""
     soup = fetch_html(url) 
     if soup is None:
         return None, None
@@ -179,25 +169,21 @@ def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
     
     if tbl:
         rows = []
-        for tr_element in tbl.select("tr"): # Utiliser select pour plus de robustesse
+        for tr_element in tbl.select("tr"):
             cells = tr_element.select("td")
             if len(cells) == 2:
-                attribute_html = cells[0]
-                value_html = cells[1]
-                
-                # Extraire le texte tout en ignorant les balises <script> et <style>
-                attribute = ' '.join(attribute_html.find_all(string=True, recursive=True, 
-                                                              _self=lambda tag: tag.parent.name not in ['script', 'style'])).strip()
-                value = ' '.join(value_html.find_all(string=True, recursive=True,
-                                                     _self=lambda tag: tag.parent.name not in ['script', 'style'])).strip()
+                # Utiliser get_text() pour une extraction plus simple et robuste du texte
+                attribute = cells[0].get_text(separator=' ', strip=True)
+                value = cells[1].get_text(separator=' ', strip=True)
                 
                 if attribute: 
                      rows.append([attribute, value])
         
         if rows:
             data_tbl = pd.DataFrame(rows, columns=["Attribut", "Valeur"])
+            # S'assurer que les lignes avec attributs vides après strip sont bien retirées
             data_tbl = data_tbl[data_tbl["Attribut"].str.strip().astype(bool)]
-            if data_tbl.empty:
+            if data_tbl.empty: # Si le DataFrame est vide après nettoyage
                 data_tbl = None 
     return img_url, data_tbl
 
@@ -256,13 +242,13 @@ def get_taxref_cd_ref(species_name: str) -> str | None:
                 if taxon.get("scientificName", "").strip().lower() == normalized_species_name:
                     cd_ref = taxon.get("id")
                     if cd_ref: return str(cd_ref)
-            if taxa_list: # Si pas de match exact, prendre le premier de la liste
+            if taxa_list: 
                 first_taxon = taxa_list[0]
                 st.info(f"[TaxRef] '{species_name}' non trouvé exactement. Utilisation de '{first_taxon.get('scientificName')}' (CD_REF: {first_taxon.get('id')}).")
                 cd_ref = first_taxon.get("id")
                 if cd_ref: return str(cd_ref)
-            return None # Aucun taxon trouvé
-        return None # Pas de section _embedded ou taxa
+            return None 
+        return None 
     except requests.RequestException as e:
         st.warning(f"[TaxRef API] Erreur de requête pour '{species_name}': {e}")
         return None
