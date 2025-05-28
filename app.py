@@ -14,7 +14,7 @@ Fonctionnement actualisé (v0.9.2)
 * Récupération des CD_REF via un fichier CSV local "DATA_CD_REF.csv" avec détection améliorée du délimiteur.
 * Ajout d'un onglet pour afficher les informations de l'INPN.
 * Utilisation d'une nouvelle URL OpenObs permettant de spécifier une emprise géographique (WKT).
-* Augmentation de la taille par défaut de l'iframe de la carte OpenObs.
+* Augmentation de la taille par défaut de l'iframe de la carte OpenObs et ajout de `allow="fullscreen"`.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from urllib.parse import quote_plus, urljoin # quote_plus est utilisé pour les fallbacks
+from urllib.parse import quote_plus, urljoin 
 import os
 
 # -----------------------------------------------------------------------------
@@ -38,8 +38,6 @@ HEADERS = {
 
 CD_REF_CSV_PATH = "DATA_CD_REF.csv"
 
-# Coordonnées par défaut pour l'emprise WKT de la carte OpenObs (couvrant la France)
-# Format: minLon, minLat, maxLon, maxLat
 DEFAULT_OPENOBS_BOUNDS = {
     "min_lon": 3.0791685730218887,
     "min_lat": 42.31877019535014,
@@ -48,7 +46,6 @@ DEFAULT_OPENOBS_BOUNDS = {
 }
 
 def is_debug_mode() -> bool:
-    """Vérifie si le mode débogage est activé via les paramètres de requête URL."""
     try:
         if hasattr(st, 'query_params'):
             return "true" in st.query_params.get_all("debug")
@@ -93,7 +90,7 @@ def load_cd_ref_data(csv_path: str) -> pd.DataFrame | None:
                     df = temp_df[["CD_REF", "NOM LATIN"]].copy()
                     if DEBUG_MODE: st.info(f"[DEBUG load_cd_ref_data] Colonnes renommées en 'CD_REF', 'NOM LATIN' avec délimiteur '{repr(delimiter)}'.")
                     break
-            df = None
+            df = None # Si conditions non remplies, réinitialiser pour le prochain délimiteur
         except pd.errors.EmptyDataError:
             st.error(f"Fichier CSV '{csv_path}' est vide.")
             return None
@@ -125,7 +122,7 @@ def load_cd_ref_data(csv_path: str) -> pd.DataFrame | None:
 TAXREF_DATA = load_cd_ref_data(CD_REF_CSV_PATH)
 
 # -----------------------------------------------------------------------------
-# Fonctions utilitaires
+# Fonctions utilitaires (inchangées par rapport à v0.9.2, sauf openobs_embed)
 # -----------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False, ttl=86_400)
@@ -145,7 +142,7 @@ def florealpes_search(species: str) -> str | None:
     base_url = "https://www.florealpes.com/"; current_page_url_for_error_reporting = base_url 
     if DEBUG_MODE: st.info(f"[DEBUG FloreAlpes] Recherche pour : {species}")
     try:
-        try: # Accès optionnel page d'accueil
+        try: 
             home_resp = session.get(base_url, timeout=10); home_resp.raise_for_status()
             if DEBUG_MODE: st.info(f"[DEBUG FloreAlpes] Accueil ({base_url}) chargé (status: {home_resp.status_code}).")
         except requests.RequestException as e:
@@ -171,7 +168,7 @@ def florealpes_search(species: str) -> str | None:
         if link_tag and link_tag.has_attr('href'):
             abs_url = urljoin(results_response.url, link_tag['href'])
             if DEBUG_MODE: st.info(f"[DEBUG FloreAlpes] URL fiche construite: {abs_url}"); return abs_url
-        else: # Fallbacks
+        else: 
             if DEBUG_MODE: st.warning("[DEBUG FloreAlpes] Lien direct non trouvé. Application fallbacks.")
             if "fiche_" in results_response.url and ".php" in results_response.url:
                 st.info(f"[FloreAlpes] URL actuelle est une fiche (fallback 1) pour '{species}': {results_response.url}"); return results_response.url
@@ -192,10 +189,10 @@ def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
         if img_tag := soup.select_one(selector):
             if img_tag.has_attr('src'):
                 try:
-                    if int(str(img_tag.get('width', '9999')).replace('px','')) > 50 : # Heuristique taille
+                    if int(str(img_tag.get('width', '9999')).replace('px','')) > 50 :
                         img_url = urljoin(url, img_tag['src'])
                         if DEBUG_MODE: st.info(f"[DEBUG scrape_florealpes] Image trouvée (sélecteur '{selector}'): {img_url}"); break 
-                except ValueError: # width non numérique
+                except ValueError: 
                     img_url = urljoin(url, img_tag['src'])
                     if DEBUG_MODE: st.info(f"[DEBUG scrape_florealpes] Image (width non num., sélecteur '{selector}'): {img_url}"); break
     tbl = soup.find("table", class_="fiche") 
@@ -232,11 +229,11 @@ def tela_botanica_url(species: str) -> str | None:
             if nn := data[0].get("num_nomen"):
                 url = f"https://www.tela-botanica.org/bdtfx-nn-{nn}-synthese"
                 if DEBUG_MODE: st.info(f"[DEBUG Tela Botanica] URL synthèse: {url}"); return url
-            else: # num_nomen non trouvé
+            else: 
                 if DEBUG_MODE: st.warning(f"[DEBUG Tela Botanica] 'num_nomen' non trouvé pour '{species}'."); return None
         else: st.warning(f"[Tela Botanica] Réponse API eFlore inattendue pour '{species}'."); return None
     except requests.RequestException as e: st.warning(f"[Tela Botanica] Erreur API pour '{species}': {e}"); return None
-    except ValueError: st.warning(f"[Tela Botanica] Erreur JSON API pour '{species}'."); return None # Implicitly response.json() failed
+    except ValueError: st.warning(f"[Tela Botanica] Erreur JSON API pour '{species}'."); return None
 
 def get_cd_ref_from_csv(species_name: str) -> str | None:
     if TAXREF_DATA is None:
@@ -249,7 +246,7 @@ def get_cd_ref_from_csv(species_name: str) -> str | None:
         cd_ref = str(match["CD_REF"].iloc[0])
         if DEBUG_MODE: st.info(f"[DEBUG CD_REF CSV] CD_REF '{cd_ref}' trouvé pour '{species_name}'.")
         return cd_ref
-    else: # Pas de correspondance exacte
+    else: 
         if DEBUG_MODE: st.warning(f"[DEBUG CD_REF CSV] Aucun CD_REF trouvé pour '{species_name}' dans CSV.")
         return None
 
@@ -257,36 +254,29 @@ def openobs_embed(species: str) -> str:
     """Génère le HTML pour l'iframe OpenObs, utilisant la nouvelle URL avec WKT si CD_REF disponible."""
     cd_ref = get_cd_ref_from_csv(species)
     if cd_ref:
-        # Construction de la chaîne WKT pour l'emprise par défaut
         b = DEFAULT_OPENOBS_BOUNDS
         wkt_polygon = (
             f"MULTIPOLYGON((("
-            f"{b['min_lon']}+{b['max_lat']},"  # Top-left
-            f"{b['min_lon']}%20{b['min_lat']},"  # Bottom-left
-            f"{b['max_lon']}%20{b['min_lat']},"  # Bottom-right
-            f"{b['max_lon']}%20{b['max_lat']},"  # Top-right
-            f"{b['min_lon']}%20{b['max_lat']}"   # Closing Top-left
+            f"{b['min_lon']}+{b['max_lat']},"
+            f"{b['min_lon']}%20{b['min_lat']},"
+            f"{b['max_lon']}%20{b['min_lat']},"
+            f"{b['max_lon']}%20{b['max_lat']},"
+            f"{b['min_lon']}%20{b['max_lat']}"
             f")))"
         )
-        # Construction de la requête q
         q_param = f"lsid%3A{cd_ref}%20AND%20(dynamicProperties_diffusionGP%3A%22true%22)"
-        
         iframe_url = (
             f"https://openobs.mnhn.fr/openobs-hub/occurrences/search"
-            f"?q={q_param}"
-            f"&qc=" # paramètre qc vide comme dans l'exemple
-            f"&wkt={wkt_polygon}"
-            f"#tab_mapView"
+            f"?q={q_param}&qc=&wkt={wkt_polygon}#tab_mapView"
         )
-        if DEBUG_MODE: st.info(f"[DEBUG OpenObs] Utilisation nouvelle URL OpenObs avec CD_REF {cd_ref} et WKT. URL: {iframe_url}")
+        if DEBUG_MODE: st.info(f"[DEBUG OpenObs] Utilisation nouvelle URL OpenObs (CD_REF {cd_ref}, WKT). URL: {iframe_url}")
         return f"<iframe src='{iframe_url}' width='100%' height='100%' frameborder='0' style='min-height: 650px;' allow='fullscreen'></iframe>"
-    else: # Fallback si CD_REF non trouvé
-        st.warning(f"[OpenObs] CD_REF non trouvé dans CSV pour '{species}'. Utilisation de l'ancienne URL OpenObs par nom.")
-        # Ancienne URL de fallback (plus simple, sans WKT ni lsid)
-        fallback_url = f"https://openobs.mnhn.fr/map.html?sp={quote_plus(species)}"
+    else: 
+        st.warning(f"[OpenObs] CD_REF non trouvé pour '{species}'. Utilisation ancienne URL OpenObs par nom.")
+        fallback_url = f"https://openobs.mnhn.fr/map.html?sp={quote_plus(species)}" # Fallback sans WKT
         return (
             f"<p style='color: orange; border: 1px solid orange; padding: 5px; border-radius: 3px;'>"
-            f"Avertissement : CD_REF pour '{species}' non récupéré depuis CSV. Carte OpenObs basée sur recherche par nom simple.</p>"
+            f"Avertissement : CD_REF pour '{species}' non récupéré. Carte OpenObs basée sur recherche par nom simple.</p>"
             f"<iframe src='{fallback_url}' width='100%' height='100%' frameborder='0' style='min-height: 400px;' allow='fullscreen'></iframe>"
         )
 
@@ -296,7 +286,7 @@ def biodivaura_url(species: str) -> str:
         url = f"https://atlas.biodiversite-auvergne-rhone-alpes.fr/espece/{cd_ref}"
         if DEBUG_MODE: st.info(f"[DEBUG Biodiv'AURA] Utilisation CD_REF {cd_ref} (CSV) pour URL: {url}")
         return url
-    else: # Fallback
+    else: 
         st.warning(f"[Biodiv'AURA] CD_REF non trouvé pour '{species}'. Utilisation URL de recherche.")
         return f"https://atlas.biodiversite-auvergne-rhone-alpes.fr/recherche?keyword={quote_plus(species)}"
 
@@ -306,7 +296,7 @@ def inpn_species_url(species: str) -> str | None:
         url = f"https://inpn.mnhn.fr/espece/cd_nom/{cd_ref}"
         if DEBUG_MODE: st.info(f"[DEBUG INPN] URL INPN avec CD_REF {cd_ref} (CSV): {url}")
         return url
-    else: # Fallback
+    else: 
         if DEBUG_MODE: st.warning(f"[DEBUG INPN] CD_REF non trouvé pour '{species}'. Lien de recherche INPN.")
         return f"https://inpn.mnhn.fr/collTerr/nomenclature/espece/recherche?texteRecherche={quote_plus(species)}"
 
@@ -350,11 +340,10 @@ if st.session_state.button_clicked and input_txt.strip():
         col_map, col_intro = st.columns([2, 1]) 
 
         with col_map:
-            st.markdown("##### 🗺️ Carte de répartition (OpenObs/INPN)")
+            st.markdown("##### 🗺️ Carte de répartition (OpenObs)")
             with st.spinner(f"Chargement carte OpenObs pour '{sp}'..."):
                 html_openobs_main = openobs_embed(sp)
-            # Augmentation de la hauteur de l'iframe de la carte principale
-            st.components.v1.html(html_openobs_main, height=650) 
+            st.components.v1.html(html_openobs_main, height=650) # Hauteur augmentée
 
         with col_intro:
             st.markdown("##### ℹ️ Sources d'Information")
