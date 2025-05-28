@@ -4,17 +4,15 @@
 Streamlit app : récupération automatisée d’informations botaniques
 
 Auteur : Robin Wojcik (Améten)
-Date   : 2025-05-28 (MàJ Selenium pour FloreAlpes)
+Date   : 2025-05-28 (Retour à requests+BeautifulSoup pour FloreAlpes)
 
-Fonctionnement actualisé (v0.4 - Intégration Selenium pour FloreAlpes)
+Fonctionnement actualisé (v0.5 - Requests pour FloreAlpes)
 --------------------------------------------------------------------
-* La recherche FloreAlpes utilise Selenium pour la navigation et l'obtention de l'URL de la fiche espèce.
-  Cela simule la navigation utilisateur via la page d'accueil et la soumission du champ `chaine`.
-* La fonction `scrape_florealpes` utilise ensuite cette URL avec requests/BeautifulSoup pour l'extraction.
-* La carte OpenObs (si CD_REF trouvé) est affichée sur la page principale des résultats par espèce.
-* Biodiv'AURA Atlas utilise désormais le CD_REF de TaxRef si disponible pour un accès direct.
-* Correction de la graphie "Biodiv'RA" en "Biodiv'AURA".
-* Le reste du workflow (InfoFlora, Tela Botanica) est inchangé.
+* La recherche FloreAlpes utilise requests et BeautifulSoup pour la navigation et l'obtention de l'URL.
+  Ceci évite les dépendances lourdes et problèmes potentiels de Selenium/WebDriver.
+* Logique d'extraction du lien de la fiche espèce améliorée dans la fonction `florealpes_search`.
+* La fonction `scrape_florealpes` utilise requests/BeautifulSoup pour l'extraction depuis l'URL obtenue.
+* Les autres modules (InfoFlora, Tela Botanica, OpenObs, Biodiv'AURA) sont inchangés.
 """
 
 from __future__ import annotations
@@ -22,16 +20,10 @@ from __future__ import annotations
 import pandas as pd
 import requests
 import streamlit as st
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag # Ajout pour type checking potentiel
 from urllib.parse import quote_plus, urljoin
 
-# Selenium imports
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
-from selenium.webdriver.chrome.options import Options as ChromeOptions
+# Selenium imports sont retirés
 
 # -----------------------------------------------------------------------------
 # Configuration globale
@@ -63,169 +55,165 @@ def fetch_html(url: str, session: requests.Session | None = None) -> BeautifulSo
 @st.cache_data(show_spinner=False, ttl=86_400)
 def florealpes_search(species: str) -> str | None:
     """
-    Recherche une espèce sur FloreAlpes en utilisant Selenium pour naviguer
+    Recherche une espèce sur FloreAlpes en utilisant requests et BeautifulSoup
     et retourne l'URL de la page de l'espèce.
     """
-    options = ChromeOptions()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument("window-size=1920,1080")
-    options.add_argument(f"user-agent={HEADERS['User-Agent']}")
+    search_url_base = "https://www.florealpes.com/recherche.php"
+    params_florealpes = {"chaine": species}
+    
+    sess = requests.Session()
+    sess.headers.update(HEADERS)
 
-    driver = None
     try:
-        # Assumes chromedriver is in PATH. For robust deployment, consider:
-        # from selenium.webdriver.chrome.service import Service as ChromeService
-        # from webdriver_manager.chrome import ChromeDriverManager
-        # driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
-        driver = webdriver.Chrome(options=options)
-
-        driver.get("https://www.florealpes.com/")
-        
-        search_input = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='chaine'], input[id='chaine']"))
-        )
-        search_input.clear()
-        search_input.send_keys(species)
-
+        # Accès initial à la page d'accueil peut aider avec certains cookies/sessions
+        index_url = "https://www.florealpes.com/index.php"
         try:
-            ok_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//input[@type='submit' and @value='OK'] | //button[contains(text(),'OK')] | //input[@value='OK']"))
-            )
-            ok_button.click()
-        except TimeoutException:
-            try:
-                search_input.submit() # Fallback: submit form
-            except Exception as e_submit:
-                st.warning(f"[FloreAlpes Selenium] Impossible de trouver/cliquer bouton OK et soumission échouée pour '{species}': {e_submit}")
-                if driver: driver.quit()
-                return None
-        
-        WebDriverWait(driver, 15).until(EC.url_contains("recherche.php"))
+            sess.get(index_url, timeout=10, headers=HEADERS).raise_for_status()
+        except requests.RequestException as e:
+            st.info(f"[FloreAlpes Requests] Avertissement: Impossible de charger la page d'accueil avant recherche: {e}")
 
-        page_text_lower = driver.page_source.lower()
-        if "aucun résultat à votre requête" in page_text_lower or "pas de résultats" in page_text_lower:
-            st.info(f"[FloreAlpes Selenium] Aucun résultat trouvé pour '{species}' sur FloreAlpes.")
-            if driver: driver.quit()
+        resp = sess.get(search_url_base, params=params_florealpes, timeout=15)
+        resp.raise_for_status()
+        current_page_url = resp.url # URL réelle après d'éventuelles redirections
+
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        page_text_lower = resp.text.lower()
+        if "aucun résultat à votre requête" in page_text_lower or "pas de résultats trouvés pour cette recherche" in page_text_lower:
+            st.info(f"[FloreAlpes Requests] Aucun résultat trouvé pour '{species}' sur FloreAlpes.")
             return None
+
+        # Cas où FloreAlpes redirige directement vers la fiche espèce
+        if "fiche_" in current_page_url and ".php" in current_page_url:
+            st.info(f"[FloreAlpes Requests] Redirection directe vers la fiche pour '{species}': {current_page_url}")
+            return current_page_url
 
         target_url = None
         normalized_species_input = species.strip().lower()
-
-        try:
-            # Prioritize rows containing the species name
-            result_rows = driver.find_elements(By.XPATH, "//table//tr[.//a[contains(@href, 'fiche_')]]")
-            if not result_rows:
-                 result_rows = driver.find_elements(By.XPATH, "//tr[.//a[contains(@href, 'fiche_')]]")
-
-            for row in result_rows:
-                row_text_lower = ""
-                try:
-                    row_text_lower = row.text.lower()
-                except StaleElementReferenceException: # Element might disappear
-                    continue 
-                
-                if normalized_species_input in row_text_lower:
-                    try:
-                        link_element = row.find_element(By.XPATH, ".//a[contains(@href, 'fiche_')]")
-                        href = link_element.get_attribute('href')
-                        if href:
-                            target_url = urljoin("https://www.florealpes.com/", href)
-                            break 
-                    except NoSuchElementException:
-                        continue
-            if target_url:
-                if driver: driver.quit()
-                return target_url
-        except Exception as e_complex_find:
-            st.info(f"[FloreAlpes Selenium] Erreur pendant la recherche de lien complexe pour '{species}': {e_complex_find}. Essai méthodes alternatives.")
-
-        # Fallback 1: Simple CSS selector (original Streamlit app v0.3 approach, but with Selenium)
-        if not target_url:
-            try:
-                link_tag = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "a[href^='fiche_'][href$='.php']")) 
-                )
-                href = link_tag.get_attribute('href')
-                if href:
-                    target_url = urljoin("https://www.florealpes.com/", href)
-                    st.info(f"[FloreAlpes Selenium] Utilisation du sélecteur CSS simple (fallback) pour '{species}'.")
-                    if driver: driver.quit()
-                    return target_url
-            except TimeoutException:
-                st.info(f"[FloreAlpes Selenium] Sélecteur CSS simple (fallback) n'a pas trouvé de lien pour '{species}'.")
-
-        # Fallback 2: First 'fiche_' link available if any other method failed
-        if not target_url:
-            all_fiche_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'fiche_')]")
-            if all_fiche_links:
-                href = all_fiche_links[0].get_attribute('href')
-                if href:
-                    target_url = urljoin("https://www.florealpes.com/", href)
-                    st.warning(f"[FloreAlpes Selenium] Utilisation du premier lien 'fiche_' disponible (dernier recours) pour '{species}'.")
-                    if driver: driver.quit()
-                    return target_url
         
-        st.warning(f"[FloreAlpes Selenium] Aucun lien de fiche approprié trouvé pour '{species}' après toutes les tentatives.")
-        if driver: driver.quit()
+        # Recherche structurée du lien :
+        # Les résultats sont souvent dans des <tr> d'une <table>
+        # Chaque <tr> pertinente contient le nom de l'espèce (souvent en <i>) et un lien vers la fiche.
+        result_rows = soup.select("tr") # Sélection large, puis filtrage
+        
+        candidate_links = []
+
+        for row in result_rows:
+            row_text_lower = row.get_text(strip=True).lower()
+            
+            if normalized_species_input in row_text_lower:
+                # L'espèce est mentionnée, maintenant trouver le lien 'fiche_' dans cette ligne
+                link_tag = row.select_one("a[href^='fiche_']")
+                if link_tag and link_tag.has_attr('href'):
+                    # Vérifier si le nom de l'espèce est bien associé à ce lien (plus précis)
+                    # Souvent, le nom scientifique est en italique <i> ou gras <b> près du lien
+                    name_elements = row.select("i, b")
+                    is_precise_match = False
+                    if name_elements:
+                        for el in name_elements:
+                            if normalized_species_input in el.get_text(strip=True).lower():
+                                is_precise_match = True
+                                break
+                    else: # Si pas de <i> ou <b>, le fait que le nom soit dans row_text_lower est un bon indicateur
+                        is_precise_match = True 
+                    
+                    if is_precise_match:
+                        relative_url = link_tag['href']
+                        absolute_url = urljoin(current_page_url, relative_url)
+                        # Prioriser les liens qui contiennent explicitement le nom ou une partie (ex: fiche_viciasativa.php)
+                        if species.split(" ")[0].lower() in relative_url.lower():
+                            st.info(f"[FloreAlpes Requests] Lien spécifique trouvé pour '{species}': {absolute_url}")
+                            return absolute_url 
+                        candidate_links.append(absolute_url) # Ajouter comme candidat
+
+        if candidate_links:
+            st.info(f"[FloreAlpes Requests] Utilisation du premier candidat trouvé pour '{species}': {candidate_links[0]}")
+            return candidate_links[0]
+
+        # Fallback: si aucune correspondance précise de ligne, prendre le premier lien 'fiche_' global
+        # C'était le comportement de la v0.3 et peut fonctionner si un seul résultat principal est retourné
+        generic_link_tag = soup.select_one("a[href^='fiche_']")
+        if generic_link_tag and generic_link_tag.has_attr('href'):
+            relative_url = generic_link_tag['href']
+            absolute_url = urljoin(current_page_url, relative_url)
+            st.warning(f"[FloreAlpes Requests] Pas de match spécifique pour '{species}'. Utilisation du premier lien 'fiche_' générique: {absolute_url}")
+            return absolute_url
+            
+        st.error(f"[FloreAlpes Requests] Fiche introuvable pour '{species}' après analyse.")
         return None
 
-    except TimeoutException as e:
-        st.warning(f"[FloreAlpes Selenium] Timeout lors de la recherche de '{species}': {e}")
-        return None # driver.quit() will be called in finally
-    except NoSuchElementException as e:
-        st.warning(f"[FloreAlpes Selenium] Élément non trouvé lors de la recherche de '{species}': {e}")
-        return None
-    except WebDriverException as e:
-        st.error(f"[FloreAlpes Selenium] Erreur WebDriver pour '{species}': {e}. Vérifiez l'installation/PATH de ChromeDriver.")
+    except requests.RequestException as e:
+        st.error(f"[FloreAlpes Requests] Erreur de requête lors de la recherche FloreAlpes pour '{species}': {e}")
         return None
     except Exception as e:
-        st.error(f"[FloreAlpes Selenium] Erreur inattendue pour '{species}': {e}")
+        st.error(f"[FloreAlpes Requests] Erreur inattendue pendant la recherche FloreAlpes ('{species}'): {e}")
         return None
-    finally:
-        if driver:
-            driver.quit()
-
 
 def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
     """Extrait l’image principale et le tableau des caractéristiques."""
-    soup = fetch_html(url)
+    soup = fetch_html(url) 
     if soup is None:
         return None, None
     
     img_url = None
-    # Try to find image within the main content area first
-    main_content_img = soup.select_one(".page-content img[src$='.jpg'], .content img[src$='.jpg']")
-    if main_content_img and main_content_img.has_attr('src'):
-        img_src_relative = main_content_img['src']
-        img_url = urljoin(url, img_src_relative) # Use current page URL as base for relative links
-    else: # Fallback to broader search
-        img_tag = soup.select_one("a[href$='.jpg'] img") or soup.select_one("img[src$='.jpg']")
+    # Sélecteurs pour l'image, du plus spécifique au plus général
+    # urljoin utilise l'URL de la page actuelle ('url') comme base pour les chemins relatifs.
+    image_selectors = [
+        "table.fiche img[src$='.jpg']", # Image dans la table 'fiche' (souvent principale)
+        ".flotte-g img[src$='.jpg']", # Classe souvent utilisée pour l'image principale
+        "img[src*='/Photos/'][src$='.jpg']", # Images dans un dossier /Photos/
+        "a[href$='.jpg'] > img[src$='.jpg']", # Image cliquable vers version plus grande
+        "img[alt*='Photo principale'][src$='.jpg']", # Image avec alt text indicatif
+        "img[src$='.jpg']" # Fallback général
+    ]
+    for selector in image_selectors:
+        img_tag = soup.select_one(selector)
         if img_tag and img_tag.has_attr('src'):
-            img_src_relative = img_tag['src']
-            img_url = urljoin("https://www.florealpes.com/", img_src_relative) # Fallback base
+            img_src = img_tag['src']
+            img_url = urljoin(url, img_src)
+            break 
 
     data_tbl = None
-    # Updated selector for table to be more specific if possible, or keep general one
-    tbl = soup.find("table", class_="fiche") # Assuming 'fiche' is the correct class
-    if not tbl: # Fallback if 'fiche' class table not found
-        tbl = soup.find("table") # More general table search, might need refinement
-
+    tbl = soup.find("table", class_="fiche") # Le tableau principal des caractéristiques
+    
+    if not tbl: # Si table.fiche non trouvée, chercher une table alternative
+        all_tables = soup.find_all("table")
+        for potential_table in all_tables:
+            text_content = potential_table.get_text(" ", strip=True).lower()
+            keywords = ["famille", "floraison", "habitat", "description", "plante", "caractères"]
+            # Compter combien de mots-clés sont présents
+            if sum(keyword in text_content for keyword in keywords) >= 2:
+                 # Vérifier si la table a des lignes avec 2 cellules (format attribut-valeur)
+                 if any(len(tr.select("td")) == 2 for tr in potential_table.select("tr")):
+                    tbl = potential_table
+                    st.info("[FloreAlpes Scraper] Tableau 'fiche' non trouvé, utilisation d'un tableau alternatif.")
+                    break
+    
     if tbl:
         rows = []
-        for tr in tbl.select("tr"):
-            cells = tr.select("td")
-            if len(cells) == 2: # Expecting two cells: Attribut, Valeur
-                attribute = cells[0].get_text(strip=True)
-                value = cells[1].get_text(strip=True)
-                if attribute: # Only add row if attribute is not empty
+        for tr_element in tbl.find_all("tr", recursive=False): # Direct children tr
+            # recursive=False peut être trop restrictif si la structure a des tbody
+            # Si cela ne fonctionne pas, utiliser tbl.select("tr")
+            # cells = tr_element.find_all("td", recursive=False)
+            # Préférer select pour plus de flexibilité avec les structures HTML variables
+            cells = tr_element.select("td")
+            
+            if len(cells) == 2:
+                # Nettoyer le texte des balises <script> ou <style> si elles existent dans les <td>
+                attribute = ' '.join(string for string in cells[0].strings if not isinstance(string, (NavigableString)) or string.parent.name not in ['script', 'style'])
+                value = ' '.join(string for string in cells[1].strings if not isinstance(string, (NavigableString)) or string.parent.name not in ['script', 'style'])
+                
+                attribute = attribute.strip()
+                value = value.strip()
+
+                if attribute: 
                      rows.append([attribute, value])
         
         if rows:
             data_tbl = pd.DataFrame(rows, columns=["Attribut", "Valeur"])
-            # Clean up empty rows that might have been parsed if attribute was initially present but value made it look empty
             data_tbl = data_tbl[data_tbl["Attribut"].str.strip().astype(bool)]
+            if data_tbl.empty:
+                data_tbl = None # DataFrame vide après nettoyage n'est pas utile
     return img_url, data_tbl
 
 
@@ -256,7 +244,7 @@ def tela_botanica_url(species: str) -> str | None:
     except requests.RequestException as e:
         st.warning(f"[Tela Botanica Debug] Erreur RequestException API eFlore pour '{species}': {e}")
         return None
-    except ValueError as e: # Catch JSON decoding errors
+    except ValueError as e: 
         resp_text = response.text if 'response' in locals() and hasattr(response, 'text') else "N/A"
         st.warning(f"[Tela Botanica Debug] Erreur décodage JSON API eFlore pour '{species}': {e}. Réponse: {resp_text[:200]}")
         return None
@@ -267,9 +255,9 @@ def get_taxref_cd_ref(species_name: str) -> str | None:
     taxref_api_url = "https://taxref.mnhn.fr/api/taxa/search"
     params = {
         "scientificNames": species_name,
-        "territories": "fr", # Search for taxa present in France
+        "territories": "fr",
         "page": 1,
-        "size": 10 # Increased size to better find exact matches among variants
+        "size": 10 
     }
     try:
         s = requests.Session()
@@ -280,20 +268,14 @@ def get_taxref_cd_ref(species_name: str) -> str | None:
 
         if data and "_embedded" in data and "taxa" in data["_embedded"] and data["_embedded"]["taxa"]:
             taxa_list = data["_embedded"]["taxa"]
-            
-            # Try to find an exact match for scientificName (case-insensitive)
             normalized_species_name = species_name.strip().lower()
             for taxon in taxa_list:
                 if taxon.get("scientificName", "").strip().lower() == normalized_species_name:
                     cd_ref = taxon.get("id")
                     if cd_ref: return str(cd_ref)
-            
-            # If no exact match, take the first result if it's reasonably confident (e.g. check rank)
-            # For now, if no exact match, we'll take the first one if list is not empty
             if taxa_list:
                 first_taxon = taxa_list[0]
-                # Optionally, add more checks here, e.g., on taxon rank if important
-                # st.info(f"[TaxRef] '{species_name}' non trouvé exactement. Utilisation de '{first_taxon.get('scientificName')}' (CD_REF: {first_taxon.get('id')}) comme meilleur candidat.")
+                st.info(f"[TaxRef] '{species_name}' non trouvé exactement. Utilisation de '{first_taxon.get('scientificName')}' (CD_REF: {first_taxon.get('id')}).")
                 cd_ref = first_taxon.get("id")
                 if cd_ref: return str(cd_ref)
             return None
@@ -301,7 +283,7 @@ def get_taxref_cd_ref(species_name: str) -> str | None:
     except requests.RequestException as e:
         st.warning(f"[TaxRef API] Erreur de requête pour '{species_name}': {e}")
         return None
-    except ValueError as e: # Catch JSON decoding errors
+    except ValueError as e: 
         resp_text = response.text if 'response' in locals() and hasattr(response, 'text') else "N/A"
         st.warning(f"[TaxRef API] Erreur décodage JSON pour '{species_name}': {e}. Réponse: {resp_text[:200]}")
         return None
@@ -314,13 +296,12 @@ def openobs_embed(species: str) -> str:
         iframe_url = f"https://openobs.mnhn.fr/redirect/inpn/taxa/{cd_ref}?view=map"
         return f"<iframe src='{iframe_url}' width='100%' height='100%' frameborder='0' style='min-height: 450px;'></iframe>"
     else:
-        # Fallback to old method if CD_REF not found
-        st.warning(f"[OpenObs] CD_REF non trouvé pour '{species}'. Tentative avec l'ancienne URL OpenObs (peut être imprécis/obsolète).")
+        st.warning(f"[OpenObs] CD_REF non trouvé pour '{species}'. Tentative avec l'ancienne URL OpenObs.")
         old_iframe_url = f"https://openobs.mnhn.fr/map.html?sp={quote_plus(species)}"
         return (
             f"<p style='color: orange; border: 1px solid orange; padding: 5px; border-radius: 3px;'>"
-            f"Avertissement : L'identifiant TaxRef (CD_REF) pour '{species}' n'a pas pu être récupéré via l'API TaxRef. "
-            f"La carte OpenObs ci-dessous est basée sur une recherche par nom, ce qui peut être moins précis ou obsolète.</p>"
+            f"Avertissement : L'identifiant TaxRef (CD_REF) pour '{species}' n'a pas pu être récupéré. "
+            f"La carte OpenObs ci-dessous est basée sur une recherche par nom (peut être moins précise ou obsolète).</p>"
             f"<iframe src='{old_iframe_url}' width='100%' height='100%' frameborder='0' style='min-height: 400px;'></iframe>"
         )
 
@@ -332,7 +313,6 @@ def biodivaura_url(species: str) -> str:
         direct_url = f"https://atlas.biodiversite-auvergne-rhone-alpes.fr/espece/{cd_ref}"
         return direct_url
     else:
-        # Fallback to search URL if CD_REF not found
         st.warning(f"[Biodiv'AURA] CD_REF non trouvé pour '{species}'. Utilisation de l'URL de recherche.")
         search_url = f"https://atlas.biodiversite-auvergne-rhone-alpes.fr/recherche?keyword={quote_plus(species)}"
         return search_url
@@ -347,8 +327,7 @@ with col_keep_section:
     st.markdown("##### Notes de Projet")
     keep_url = "https://keep.google.com/#NOTE/1dHuU90VKwWzZAgoXzTsjNiRp_QgDB1BRCfthK5hH-23Vxb_A86uTPrroczclhg"
     st.markdown(
-        "L'intégration directe de Google Keep via `iframe` est généralement restreinte "
-        "par les politiques de sécurité de Google. Un lien direct est fourni ci-dessous :"
+        "L'intégration directe de Google Keep via `iframe` est généralement restreinte. Un lien direct est fourni :"
     )
     button_html = f"""
     <a href="{keep_url}" target="_blank"
@@ -369,44 +348,41 @@ st.markdown("---")
 st.markdown("Saisissez les noms scientifiques (un par ligne) puis lancez la recherche.")
 
 input_txt = st.text_area(
-    "Liste d’espèces", placeholder="Lamium purpureum\nTrifolium alpinum", height=180
+    "Liste d’espèces", placeholder="Lamium purpureum\nTrifolium alpinum\nVicia sativa", height=180
 )
 
 if st.button("Lancer la recherche", type="primary") and input_txt.strip():
     species_list = [s.strip() for s in input_txt.splitlines() if s.strip()]
 
-    # Global session for requests to reuse connections
-    req_session = requests.Session()
-
     for sp in species_list:
         st.subheader(sp)
         st.markdown("---")
 
-        col_map, col_intro = st.columns([2, 1]) # Adjusted column ratio
+        col_map, col_intro = st.columns([2, 1])
 
         with col_map:
             st.markdown("##### Carte de répartition (OpenObs)")
-            html_openobs_main = openobs_embed(sp) # cd_ref is fetched inside
+            html_openobs_main = openobs_embed(sp)
             st.components.v1.html(html_openobs_main, height=465)
 
         with col_intro:
             st.markdown("##### Sources d'Information")
-            st.info("Les informations détaillées pour cette espèce sont disponibles dans les onglets ci-dessous. Les éventuels messages (erreurs, avertissements) des APIs s'affichent au fur et à mesure des appels.")
+            st.info("Les informations détaillées pour cette espèce sont disponibles dans les onglets ci-dessous.")
         
-        st.markdown("---") # Separator before tabs
+        st.markdown("---")
 
         tab_names = ["FloreAlpes", "InfoFlora", "Tela Botanica", "Biodiv'AURA"]
         tab_fa, tab_if, tab_tb, tab_ba = st.tabs(tab_names)
 
         with tab_fa:
             st.markdown("##### FloreAlpes")
-            with st.spinner(f"Recherche de '{sp}' sur FloreAlpes via Selenium..."):
-                url_fa = florealpes_search(sp) # Uses Selenium
+            with st.spinner(f"Recherche de '{sp}' sur FloreAlpes (via requests)..."):
+                url_fa = florealpes_search(sp) 
             
             if url_fa:
                 st.markdown(f"**FloreAlpes** : [Fiche complète]({url_fa})")
                 with st.spinner(f"Extraction des données FloreAlpes pour '{sp}'..."):
-                    img, tbl = scrape_florealpes(url_fa) # Uses requests+bs4
+                    img, tbl = scrape_florealpes(url_fa)
                 
                 if img:
                     st.image(img, caption=f"{sp} (FloreAlpes)", use_column_width=True)
@@ -415,12 +391,12 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
                 
                 if tbl is not None and not tbl.empty:
                     st.dataframe(tbl, hide_index=True)
-                elif tbl is not None and tbl.empty: # Table was found but had no data rows
+                elif tbl is not None and tbl.empty: 
                     st.info("Tableau des caractéristiques trouvé mais vide sur FloreAlpes.")
-                else: # tbl is None, meaning table not found
+                else: 
                     st.warning("Tableau des caractéristiques non trouvé sur FloreAlpes.")
             else:
-                st.error(f"Fiche introuvable sur FloreAlpes pour '{sp}' (après recherche Selenium).")
+                st.error(f"Fiche introuvable sur FloreAlpes pour '{sp}'.")
 
         with tab_if:
             st.markdown("##### InfoFlora")
@@ -439,11 +415,11 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
 
         with tab_ba:
             st.markdown("##### Biodiv'AURA Atlas")
-            url_ba_val = biodivaura_url(sp) # cd_ref is fetched inside
+            url_ba_val = biodivaura_url(sp)
             st.markdown(f"**Biodiv'AURA** : [Accéder à l’atlas]({url_ba_val})")
             st.components.v1.iframe(src=url_ba_val, height=600)
         
-        st.markdown("---") # Separator after each species block
+        st.markdown("---")
 
 else:
     st.info("Saisissez au moins une espèce pour démarrer la recherche.")
