@@ -36,7 +36,7 @@ HEADERS = {
 }
 
 # -----------------------------------------------------------------------------
-# Fonctions utilitaires (inchangées - reprises du code original pour complétude)
+# Fonctions utilitaires (inchangées)
 # -----------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False, ttl=86_400)
@@ -51,6 +51,7 @@ def fetch_html(url: str, session: requests.Session | None = None) -> BeautifulSo
     except requests.RequestException as e:
         st.warning(f"Erreur lors du téléchargement de {url}: {e}")
         return None
+
 
 def florealpes_search(species: str) -> str | None:
     """Reproduction exacte de la recherche via le formulaire FloreAlpes."""
@@ -88,6 +89,7 @@ def florealpes_search(species: str) -> str | None:
         st.error(f"Une erreur inattendue est survenue pendant la recherche FloreAlpes pour '{species}' : {e}")
         return None
 
+
 def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
     """Extrait l’image principale et le tableau des caractéristiques."""
     soup = fetch_html(url)
@@ -110,9 +112,11 @@ def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
             data_tbl = pd.DataFrame(rows, columns=["Attribut", "Valeur"])
     return img_url, data_tbl
 
+
 def infoflora_url(species: str) -> str:
     slug = species.lower().replace(" ", "-")
     return f"https://www.infoflora.ch/fr/flore/{slug}.html"
+
 
 def tela_botanica_url(species: str) -> str | None:
     """Interroge l’API eFlore pour récupérer l’identifiant num_nomen."""
@@ -139,6 +143,7 @@ def tela_botanica_url(species: str) -> str | None:
     except ValueError as e:
         st.warning(f"[Tela Botanica Debug] Erreur décodage JSON API eFlore pour '{species}': {e}. Réponse: {response.text if 'response' in locals() else 'N/A'}")
         return None
+
 
 def get_taxref_cd_ref(species_name: str) -> str | None:
     """Interroge l'API TaxRef pour récupérer le CD_REF (id TaxRef)."""
@@ -174,6 +179,7 @@ def get_taxref_cd_ref(species_name: str) -> str | None:
     except ValueError:
         return None
 
+
 def openobs_embed(species: str) -> str:
     """HTML pour afficher la carte OpenObs dans un iframe en utilisant le CD_REF."""
     cd_ref = get_taxref_cd_ref(species)
@@ -189,6 +195,7 @@ def openobs_embed(species: str) -> str:
             f"<iframe src='{old_iframe_url}' width='100%' height='100%' frameborder='0' style='min-height: 400px;'></iframe>"
         )
 
+
 def biodivaura_url(species: str) -> str:
     """Construit l'URL pour la page de l'espèce sur Biodiv'AURA Atlas, en utilisant le CD_REF si possible."""
     cd_ref = get_taxref_cd_ref(species)
@@ -203,55 +210,37 @@ def biodivaura_url(species: str) -> str:
 # Interface utilisateur
 # -----------------------------------------------------------------------------
 
-# Section pour la tentative d'intégration de Google Keep
-st.markdown("## Notes de Projet (via Google Keep)")
-keep_url = "https://keep.google.com/#NOTE/1dHuU90VKwWzZAgoXzTsjNiRp_QgDB1BRCfthK5hH-23Vxb_A86uTPrroczclhg"
+# Section pour la note Google Keep et titre principal, utilisant des colonnes
+col_keep_section, col_main_title = st.columns([1, 3], gap="large") # Ratio pour la largeur, ex: 1/4 pour Keep, 3/4 pour titre
 
-st.error(
-    "**Avertissement Technique Majeur :** L'affichage direct et l'édition de Google Keep "
-    "au sein d'une application tierce sont **bloqués par Google pour des raisons de sécurité**. "
-    "Les mécanismes tels que `X-Frame-Options` ou `Content-Security-Policy` (CSP) avec la directive `frame-ancestors` "
-    "sont spécifiquement conçus pour empêcher cette pratique afin de protéger les utilisateurs contre "
-    "le 'clickjacking' et garantir la sécurité de leurs données."
-)
+with col_keep_section:
+    st.markdown("##### Notes de Projet")
+    keep_url = "https://keep.google.com/#NOTE/1dHuU90VKwWzZAgoXzTsjNiRp_QgDB1BRCfthK5hH-23Vxb_A86uTPrroczclhg"
 
-st.warning(
-    "Le bloc ci-dessous tente d'afficher la note Google Keep via un `iframe`. "
-    "**Il est attendu que cela ne fonctionne pas comme souhaité (affichage vide, erreur, ou page non éditable).** "
-    "L'édition, en particulier, nécessite un contexte d'authentification direct avec les services Google, "
-    "incompatible avec une intégration `iframe` sur un domaine externe."
-)
+    st.markdown(
+        "L'intégration directe de Google Keep via `iframe` est généralement restreinte "
+        "par les politiques de sécurité de Google. Un lien direct est fourni ci-dessous :"
+    )
+    # Utilisation de st.link_button (Streamlit 1.33.0+) pour un bouton natif ou HTML pour plus de style
+    # st.link_button("📝 Accéder à la note Keep", keep_url, type="secondary") # Option avec st.link_button
 
-# Tentative d'intégration de l'iframe Google Keep
-# L'attribut 'sandbox' est inclus pour tenter de permettre certaines fonctionnalités,
-# mais ne peut pas outrepasser les restrictions X-Frame-Options ou CSP.
-iframe_html_code = f"""
-<iframe src="{keep_url}"
-    width="100%"
-    height="600px"
-    style="border:2px solid #FF0000; background-color: #FFF0F0;"
-    sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
-    referrerpolicy="no-referrer">
-    <p style="padding: 10px; color: red;">
-        Si vous voyez ce message, votre navigateur ne supporte pas les iframes ou le contenu de Google Keep est bloqué
-        en raison des politiques de sécurité de Google.
-        L'intégration directe et éditable n'est pas possible.
-    </p>
-</iframe>
-"""
-st.components.v1.html(iframe_html_code, height=620)
+    # Option avec HTML pour un style de bouton personnalisé si st.link_button n'est pas disponible ou pour plus de contrôle
+    button_html = f"""
+    <a href="{keep_url}" target="_blank" 
+       style="display: inline-block; padding: 0.4em 0.8em; margin-top: 0.5em; background-color: #E8E8E8; color: #31333F; 
+              text-align: center; text-decoration: none; border-radius: 0.25rem; font-weight: 500;
+              border: 1px solid #B0B0B0;">
+        📝 Accéder à la note Google Keep
+    </a>
+    """
+    st.markdown(button_html, unsafe_allow_html=True)
+    st.caption("La note s'ouvrira dans un nouvel onglet.")
 
-st.info(
-    "Si le cadre ci-dessus est vide, affiche une erreur, ou ne permet pas l'édition, "
-    "cela confirme les restrictions de sécurité imposées par Google. "
-    "Pour interagir avec votre note Google Keep, veuillez l'ouvrir directement dans votre navigateur :"
-)
-st.markdown(f"➡️ [Accéder directement à la note Google Keep (nouvel onglet)]({keep_url})")
-st.markdown("---")
+with col_main_title:
+    st.title("Recherche automatisée d’informations sur les espèces")
 
+st.markdown("---") # Séparateur horizontal sous la section titre/Keep
 
-# Reste de l'interface utilisateur principale
-st.title("Recherche automatisée d’informations sur les espèces")
 st.markdown("Saisissez les noms scientifiques (un par ligne) puis lancez la recherche.")
 
 input_txt = st.text_area(
