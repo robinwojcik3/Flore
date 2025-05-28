@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Streamlit app : récupération automatisée d’informations botaniques
+Streamlit app : récupération automatisée d'informations botaniques
 
 Auteur : Robin Wojcik (Améten)
 Date   : 2025-05-27
@@ -9,7 +9,7 @@ Date   : 2025-05-27
 Fonctionnement actualisé (v0.3)
 --------------------------------
 * La recherche FloreAlpes passe désormais **obligatoirement** par la page
-  d’accueil (https://www.florealpes.com/index.php) puis soumet le champ `chaine`.
+  d'accueil (https://www.florealpes.com/index.php) puis soumet le champ `chaine`.
   Cela reproduit exactement le comportement utilisateur.
 * La carte OpenObs (si CD_REF trouvé) est affichée sur la page principale des résultats par espèce.
 * Biodiv'AURA Atlas utilise désormais le CD_REF de TaxRef si disponible pour un accès direct.
@@ -107,7 +107,7 @@ def florealpes_search(species: str) -> str | None:
 
 
 def scrape_florealpes(url: str) -> tuple[str | None, pd.DataFrame | None]:
-    """Extrait l’image principale et le tableau des caractéristiques."""
+    """Extrait l'image principale et le tableau des caractéristiques."""
     soup = fetch_html(url)
     if soup is None:
         return None, None
@@ -137,7 +137,7 @@ def infoflora_url(species: str) -> str:
 
 
 def tela_botanica_url(species: str) -> str | None:
-    """Interroge l’API eFlore pour récupérer l’identifiant num_nomen."""
+    """Interroge l'API eFlore pour récupérer l'identifiant num_nomen."""
     api_url = (
         "https://api.tela-botanica.org/service:eflore:0.1/" "names:search?mode=exact&taxon="
         f"{quote_plus(species)}"
@@ -250,12 +250,35 @@ def biodivaura_url(species: str) -> str: # Fonction renommée
 # Interface utilisateur
 # -----------------------------------------------------------------------------
 
-st.title("Recherche automatisée d’informations sur les espèces")
-st.markdown("Saisissez les noms scientifiques (un par ligne) puis lancez la recherche.")
+st.title("Recherche automatisée d'informations sur les espèces")
 
-input_txt = st.text_area(
-    "Liste d’espèces", placeholder="Lamium purpureum\nTrifolium alpinum", height=180
-)
+# Section Google Keep en haut à gauche
+st.markdown("---")
+col_keep, col_main_content = st.columns([1, 2])
+
+with col_keep:
+    st.markdown("##### 📝 Notes Google Keep")
+    
+    # URL de la note Google Keep
+    keep_url = "https://keep.google.com/#NOTE/1dHuU90VKwWzZAgoXzTsjNiRp_QgDB1BRCfthK5hH-23Vxb_A86uTPrroczclhg"
+    
+    # Tentative d'affichage avec iframe
+    try:
+        st.components.v1.iframe(src=keep_url, height=400, scrolling=True)
+    except Exception as e:
+        # Alternative si l'iframe ne fonctionne pas
+        st.markdown(f"**[📝 Ouvrir la note Google Keep]({keep_url})**")
+        st.info("⚠️ Google Keep ne peut pas être affiché directement dans l'application en raison des restrictions de sécurité. Cliquez sur le lien ci-dessus pour ouvrir dans un nouvel onglet.")
+
+with col_main_content:
+    st.markdown("##### Interface de recherche")
+    st.markdown("Saisissez les noms scientifiques (un par ligne) puis lancez la recherche.")
+    
+    input_txt = st.text_area(
+        "Liste d'espèces", placeholder="Lamium purpureum\nTrifolium alpinum", height=180
+    )
+
+st.markdown("---")
 
 if st.button("Lancer la recherche", type="primary") and input_txt.strip():
     species_list = [s.strip() for s in input_txt.splitlines() if s.strip()]
@@ -311,11 +334,11 @@ if st.button("Lancer la recherche", type="primary") and input_txt.strip():
                 st.markdown(f"**Tela Botanica** : [Synthèse eFlore]({url_tb})")
                 st.components.v1.iframe(src=url_tb, height=600)
             else:
-                st.warning(f"Aucune correspondance via l’API eFlore de Tela Botanica pour '{sp}'.")
+                st.warning(f"Aucune correspondance via l'API eFlore de Tela Botanica pour '{sp}'.")
 
         with tab_ba: # Utilisation de la variable d'onglet pour Biodiv'AURA
             url_ba_val = biodivaura_url(sp) # Appel de la fonction renommée
-            st.markdown(f"**Biodiv'AURA** : [Accéder à l’atlas]({url_ba_val})") # Nom corrigé
+            st.markdown(f"**Biodiv'AURA** : [Accéder à l'atlas]({url_ba_val})") # Nom corrigé
             st.components.v1.iframe(src=url_ba_val, height=600)
 else:
     st.info("Saisissez au moins une espèce pour démarrer la recherche.")
